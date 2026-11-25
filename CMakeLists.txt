@@ -63,7 +63,7 @@ if (DEFINED ENV{GEODE_SDK} OR NOT GDAI_BUILD_TESTS)
     )
 
     add_library(${PROJECT_NAME} SHARED ${GDAI_MOD_SOURCES})
-    target_link_libraries(${PROJECT_NAME} PRIVATE gdai_core)
+    target_link_libraries(${PROJECT_NAME} gdai_core)
 
     add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
     setup_geode_mod(${PROJECT_NAME})
