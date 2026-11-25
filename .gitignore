@@ -1,0 +1,63 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+out/
+
+# Geode & CMake artifacts
+*.geode
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+CMakeUserPresets.json
+cmake_install.cmake
+compile_commands.json
+Makefile
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+
+# Compiled C/C++ objects & binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.dSYM/
+tests/gdai_tests
+
+# GD-AI trained checkpoints & telemetry exports
+*.gdai
+*.csv
+models/
+
+# IDE & Editor files
+.vscode/
+.idea/
+.cache/
+.clangd/
+.vs/
+*.sln
+*.vcxproj*
+*.xcodeproj/
+*.xcworkspace/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini

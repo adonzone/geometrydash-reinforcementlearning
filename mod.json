@@ -1,0 +1,89 @@
+{
+    "geode": "v6.0.0",
+    "gd": {
+        "win": "2.2091",
+        "mac": "2.2091",
+        "android": "2.2091",
+        "ios": "2.2091"
+    },
+    "id": "gdai.rl-master",
+    "name": "GD-AI RL Master",
+    "version": "v1.0.0",
+    "developer": "GDAI",
+    "description": "In-game Proximal Policy Optimization (PPO) reinforcement learning agent that trains to master Geometry Dash levels with a live statistics HUD, vision overlay, and analytics dashboard.",
+    "about": "about.md",
+    "tags": ["gameplay", "utility", "interface"],
+    "dependencies": {
+        "geode.node-ids": ">=v1.23.3"
+    },
+    "settings": {
+        "ai-enabled": {
+            "name": "Enable AI Agent",
+            "description": "Master switch for AI control when entering a level.",
+            "type": "bool",
+            "default": true
+        },
+        "training-mode": {
+            "name": "Training Mode",
+            "description": "When enabled, the agent explores and updates its neural network via PPO. Disable for deterministic Evaluation / Play mode.",
+            "type": "bool",
+            "default": true
+        },
+        "show-hud": {
+            "name": "Show Live Stats HUD",
+            "description": "Display the compact real-time RL statistics overlay and progress chart during gameplay.",
+            "type": "bool",
+            "default": true
+        },
+        "show-vision": {
+            "name": "Show AI Vision Overlay",
+            "description": "Render the AI's egocentric obstacle perception grid directly over the level.",
+            "type": "bool",
+            "default": true
+        },
+        "per-level-model": {
+            "name": "Per-Level Model Specialization",
+            "description": "Save and load a separate model per level ID instead of sharing one global generalist master brain.",
+            "type": "bool",
+            "default": false
+        },
+        "auto-save": {
+            "name": "Auto-Save Best Models",
+            "description": "Automatically persist neural network weights when a new best percentage or rolling reward record is achieved.",
+            "type": "bool",
+            "default": true
+        },
+        "training-speed": {
+            "name": "Training Time Scale",
+            "description": "Physics speedup multiplier during training mode (1.0 = normal speed, up to 4.0 = 4x faster training).",
+            "type": "float",
+            "default": 1.0,
+            "min": 0.5,
+            "max": 4.0,
+            "control": {
+                "slider": true,
+                "slider-step": 0.5
+            }
+        },
+        "learning-rate": {
+            "name": "PPO Learning Rate (x1e-4)",
+            "description": "AdamW learning rate scaled by 1e-4 (e.g. 3.0 = 3e-4).",
+            "type": "float",
+            "default": 3.0,
+            "min": 0.2,
+            "max": 15.0,
+            "control": {
+                "slider": true,
+                "slider-step": 0.1
+            }
+        },
+        "decision-interval": {
+            "name": "Decision Tick Interval",
+            "description": "Number of physics frames between RL policy decisions (1 = every frame, 2 = balanced).",
+            "type": "int",
+            "default": 2,
+            "min": 1,
+            "max": 6
+        }
+    }
+}
