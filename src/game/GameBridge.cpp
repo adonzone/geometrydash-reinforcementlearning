@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 
 using namespace geode::prelude;
 
@@ -84,39 +85,62 @@ std::vector<env::LevelObject> GameBridge::extractNearbyObjects(
     const float minY = playerY - 240.0f;
     const float maxY = playerY + 240.0f;
 
-    auto collectFromArray = [&](CCArray* arr) {
-        if (!arr) return;
-        for (auto* obj : CCArrayExt<GameObject*>(arr)) {
-            if (!obj) continue;
-            const auto cat = classifyObject(obj);
-            if (cat == env::ObjectCategory::None) continue;
+    auto collectObject = [&](GameObject* obj) {
+        if (!obj) return;
+        const auto cat = classifyObject(obj);
+        if (cat == env::ObjectCategory::None) return;
 
-            const CCRect rect = obj->getObjectRect();
-            const float ox0 = rect.getMinX();
-            const float ox1 = rect.getMaxX();
-            const float oy0 = rect.getMinY();
-            const float oy1 = rect.getMaxY();
+        const CCRect rect = obj->getObjectRect();
+        const float ox0 = rect.getMinX();
+        const float ox1 = rect.getMaxX();
+        const float oy0 = rect.getMinY();
+        const float oy1 = rect.getMaxY();
 
-            if (ox1 < minX || ox0 > maxX || oy1 < minY || oy0 > maxY) {
-                continue;
-            }
-            result.push_back(env::LevelObject{ox0, oy0, ox1, oy1, cat});
+        if (ox1 < minX || ox0 > maxX || oy1 < minY || oy0 > maxY) {
+            return;
         }
+        result.push_back(env::LevelObject{ox0, oy0, ox1, oy1, cat});
     };
 
-    // Prefer GD's spatial section table (100-unit X buckets) for O(1) lookup on large levels
-    if (playLayer->m_sections && playLayer->m_sections->count() > 0) {
-        const int totalSec = static_cast<int>(playLayer->m_sections->count());
-        const int secStart = std::clamp(static_cast<int>(std::floor(minX / 100.0f)), 0, totalSec - 1);
-        const int secEnd = std::clamp(static_cast<int>(std::floor(maxX / 100.0f)), 0, totalSec - 1);
+    // Prefer GD's 2D spatial section grid (100-unit X/Y buckets) for O(1) lookup on large levels
+    if (!playLayer->m_sections.empty()) {
+        const int totalXSec = static_cast<int>(playLayer->m_sections.size());
+        const int xSecStart = std::clamp(static_cast<int>(std::floor(minX / 100.0f)), 0, totalXSec - 1);
+        const int xSecEnd = std::clamp(static_cast<int>(std::floor(maxX / 100.0f)), 0, totalXSec - 1);
         result.reserve(96);
-        for (int s = secStart; s <= secEnd; ++s) {
-            auto* sectionArr = typeinfo_cast<CCArray*>(playLayer->m_sections->objectAtIndex(s));
-            collectFromArray(sectionArr);
+
+        for (int xSec = xSecStart; xSec <= xSecEnd; ++xSec) {
+            auto* col = playLayer->m_sections[static_cast<std::size_t>(xSec)];
+            if (!col || col->empty()) continue;
+
+            auto* colSizes = (static_cast<std::size_t>(xSec) < playLayer->m_sectionSizes.size())
+                ? playLayer->m_sectionSizes[static_cast<std::size_t>(xSec)]
+                : nullptr;
+
+            const int totalYSec = static_cast<int>(col->size());
+            const int ySecStart = std::clamp(static_cast<int>(std::floor(minY / 100.0f)), 0, totalYSec - 1);
+            const int ySecEnd = std::clamp(static_cast<int>(std::floor(maxY / 100.0f)), 0, totalYSec - 1);
+
+            for (int ySec = ySecStart; ySec <= ySecEnd; ++ySec) {
+                auto* cell = (*col)[static_cast<std::size_t>(ySec)];
+                if (!cell || cell->empty()) continue;
+
+                std::size_t count = cell->size();
+                if (colSizes && static_cast<std::size_t>(ySec) < colSizes->size()) {
+                    const int activeCount = (*colSizes)[static_cast<std::size_t>(ySec)];
+                    count = std::min(count, static_cast<std::size_t>(std::max(0, activeCount)));
+                }
+
+                for (std::size_t k = 0; k < count; ++k) {
+                    collectObject((*cell)[k]);
+                }
+            }
         }
     } else if (playLayer->m_objects) {
         result.reserve(96);
-        collectFromArray(playLayer->m_objects);
+        for (auto* obj : CCArrayExt<GameObject*>(playLayer->m_objects)) {
+            collectObject(obj);
+        }
     }
 
     return result;

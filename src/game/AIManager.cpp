@@ -41,7 +41,7 @@ void AIManager::syncFromSettings() {
 }
 
 std::filesystem::path AIManager::currentModelPath() const {
-    const auto baseDir = Mod::get()->getSaveDir() / "models";
+    const auto baseDir = std::filesystem::path(Mod::get()->getSaveDir().native()) / "models";
     if (m_perLevelModel && m_currentLevelId != 0) {
         return baseDir / fmt::format("level_{}.gdai", m_currentLevelId);
     }
@@ -49,7 +49,7 @@ std::filesystem::path AIManager::currentModelPath() const {
 }
 
 std::filesystem::path AIManager::statsCSVPath() const {
-    return Mod::get()->getSaveDir() / fmt::format("stats_{}.csv", m_currentLevelId);
+    return std::filesystem::path(Mod::get()->getSaveDir().native()) / fmt::format("stats_{}.csv", m_currentLevelId);
 }
 
 std::string AIManager::activeModelLabel() const {

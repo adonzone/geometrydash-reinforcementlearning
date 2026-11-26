@@ -19,7 +19,7 @@ private:
     enum class ChartMetric { Progress = 0, Reward = 1, PPODiagnostics = 2 };
 
     void switchTab(Tab tab);
-    void rebuildContent();
+    void rebuildTabContent();
     void buildControlsTab(cocos2d::CCNode* parent);
     void buildAnalyticsTab(cocos2d::CCNode* parent);
     void buildModelsTab(cocos2d::CCNode* parent);

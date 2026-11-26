@@ -1,5 +1,6 @@
 #include "PolicyNetwork.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 

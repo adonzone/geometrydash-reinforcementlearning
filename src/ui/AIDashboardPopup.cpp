@@ -61,16 +61,16 @@ bool AIDashboardPopup::init() {
     m_toastLabel->setColor({120, 255, 165});
     this->m_mainLayer->addChild(m_toastLabel, 6);
 
-    rebuildContent();
+    rebuildTabContent();
     return true;
 }
 
 void AIDashboardPopup::switchTab(Tab tab) {
     m_activeTab = tab;
-    rebuildContent();
+    rebuildTabContent();
 }
 
-void AIDashboardPopup::rebuildContent() {
+void AIDashboardPopup::rebuildTabContent() {
     if (!m_contentLayer) return;
     m_contentLayer->removeAllChildren();
 
@@ -101,7 +101,7 @@ void AIDashboardPopup::buildControlsTab(CCNode* parent) {
             spr,
             [this, cb = std::move(onClick)](CCObject*) {
                 cb();
-                this->rebuildContent();
+                this->rebuildTabContent();
             }
         );
         btn->setPosition(pos);
@@ -170,7 +170,7 @@ void AIDashboardPopup::buildControlsTab(CCNode* parent) {
             spr,
             [this, &mgr, sp](CCObject*) {
                 mgr.setTrainingSpeed(sp);
-                this->rebuildContent();
+                this->rebuildTabContent();
             }
         );
         btn->setPosition({col2 - 60.f + static_cast<float>(i) * 40.f, size.height - 114.f});
@@ -222,7 +222,7 @@ void AIDashboardPopup::buildAnalyticsTab(CCNode* parent) {
             spr,
             [this, m](CCObject*) {
                 m_chartMetric = m;
-                this->rebuildContent();
+                this->rebuildTabContent();
             }
         );
         btn->setPosition({x, size.height - 16.f});
@@ -331,7 +331,7 @@ void AIDashboardPopup::buildModelsTab(CCNode* parent) {
             [this, &mgr, p, title](CCObject*) {
                 mgr.applyPreset(p);
                 m_toastLabel->setString(fmt::format("Applied preset: {}", title).c_str());
-                this->rebuildContent();
+                this->rebuildTabContent();
             }
         );
         btn->setPosition({x, size.height - 42.f});
@@ -385,7 +385,7 @@ void AIDashboardPopup::buildModelsTab(CCNode* parent) {
     addActionBtn("Load Model", "GJ_button_05.png", {size.width * 0.41f, 38.f}, [this, &mgr]() {
         const bool ok = mgr.loadCurrentModel();
         m_toastLabel->setString(ok ? "Loaded saved model checkpoint!" : "No saved checkpoint found yet.");
-        this->rebuildContent();
+        this->rebuildTabContent();
     });
 
     addActionBtn("Export CSV", "GJ_button_04.png", {size.width * 0.62f, 38.f}, [this, &mgr]() {
@@ -396,7 +396,7 @@ void AIDashboardPopup::buildModelsTab(CCNode* parent) {
     addActionBtn("Reset Brain", "GJ_button_06.png", {size.width * 0.83f, 38.f}, [this, &mgr]() {
         mgr.resetModelAndStats();
         m_toastLabel->setString("Reset neural weights & training statistics.");
-        this->rebuildContent();
+        this->rebuildTabContent();
     });
 }
 
