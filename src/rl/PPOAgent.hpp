@@ -56,8 +56,10 @@ struct PPOConfig {
 };
 
 struct ActionDecision {
-    int action = 0;       // 0 = RELEASE, 1 = HOLD
-    float holdProb = 0.5f;
+    int action = 0;       // 0 = RELEASE, 1 = CLICK (TAP), 2 = HOLD
+    float releaseProb = 0.75f;
+    float clickProb = 0.20f;
+    float holdProb = 0.05f;
     float logProb = 0.0f;
     float value = 0.0f;
     Vec normObs;

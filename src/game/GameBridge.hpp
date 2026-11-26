@@ -24,6 +24,12 @@ public:
 
     static env::ObjectCategory classifyObject(GameObject* obj);
 
+    enum class ActionType : int {
+        Release = 0,
+        Click = 1,
+        Hold = 2
+    };
+
     static void applyAction(PlayLayer* playLayer, int action, bool& currentlyHolding);
     static void releaseAllInputs(PlayLayer* playLayer, bool& currentlyHolding);
 

@@ -54,11 +54,11 @@ void testFiniteDifferenceGradients() {
     auto evalLoss = [&]() -> double {
         auto c = net.forward(obs);
         double vErr = static_cast<double>(c.value) - 1.25;
-        return 0.7 * static_cast<double>(c.logit0) - 0.4 * static_cast<double>(c.logit1) + 0.5 * vErr * vErr;
+        return 0.7 * static_cast<double>(c.logits[0]) - 0.4 * static_cast<double>(c.logits[1]) + 0.3 * static_cast<double>(c.logits[2]) + 0.5 * vErr * vErr;
     };
 
     const auto cache = net.forward(obs);
-    net.backwardAccumulate(obs, cache, 0.7f, -0.4f, cache.value - 1.25f);
+    net.backwardAccumulate(obs, cache, 0.7f, -0.4f, 0.3f, cache.value - 1.25f);
 
     constexpr float eps = 1e-3f;
     double maxAbsErr = 0.0;
@@ -361,16 +361,18 @@ public:
     };
 
     StepResult step(int action) {
-        const bool hold = (action != 0);
+        // action: 0 = Release, 1 = Click (Tap), 2 = Hold
+        const bool isClick = (action == 1);
+        const bool isHold = (action == 2);
         m_player.prevYVelocity = m_player.yVelocity;
-        m_player.isHolding = hold;
-        m_player.holdDurationSec = hold ? (m_player.holdDurationSec + kDt) : 0.0f;
+        m_player.isHolding = isHold;
+        m_player.holdDurationSec = isHold ? (m_player.holdDurationSec + kDt) : 0.0f;
         m_player.recentActions[3] = m_player.recentActions[2];
         m_player.recentActions[2] = m_player.recentActions[1];
         m_player.recentActions[1] = m_player.recentActions[0];
-        m_player.recentActions[0] = hold ? 1.0f : 0.0f;
+        m_player.recentActions[0] = isHold ? 1.0f : (isClick ? 0.5f : 0.0f);
 
-        if (m_player.mode == env::Gamemode::Cube && hold && m_player.isOnGround) {
+        if (m_player.mode == env::Gamemode::Cube && (isClick || isHold) && m_player.isOnGround) {
             m_player.yVelocity = kJumpVel;
             m_player.isOnGround = false;
         }
@@ -398,7 +400,7 @@ public:
                     }
                 }
             } else {
-                const float accel = kShipGravity + (hold ? kShipThrust : 0.0f);
+                const float accel = kShipGravity + (isHold ? kShipThrust : (isClick ? (kShipThrust * 0.65f) : 0.0f));
                 m_player.yVelocity = std::clamp(m_player.yVelocity + accel * subDt, -260.0f, 260.0f);
                 m_player.y += m_player.yVelocity * subDt;
                 if (m_player.y <= kPlayerHalf) {
@@ -606,12 +608,35 @@ void testEndToEndMultiModeConvergence() {
     expect(mastered || bestEvalPct >= 100.0f, "Multi-mode PPO+SIL agent failed to clear Cube+Ship course");
 }
 
+void testClickReleaseHoldActionSpaceAndLowHoldProb() {
+    const auto cfg = rl::PPOConfig::fromPreset(rl::TrainingPreset::FastLearner, 16, 8);
+    rl::PPOAgent agent(cfg);
+    rl::Vec obs(16, 0.1f);
+
+    const auto decision = agent.selectAction(obs, false);
+    expect(decision.holdProb < 0.10f, "Hold probability must be significantly suppressed (<10%) by default");
+    expect(decision.releaseProb > 0.65f, "Release probability should be the dominant default (>65%)");
+    expect(decision.clickProb > 0.10f, "Click probability should be available for discrete taps (>10%)");
+    expect(decision.action == 0, "Default deterministic action must be Release (0)");
+
+    // Test that MultiMode tuning gives Ship higher lift than Cube
+    rl::MultiModePPOAgent multi(rl::TrainingPreset::FastLearner, 16, 8);
+    const auto cubeDec = multi.selectAction(env::Gamemode::Cube, obs, false);
+    const auto shipDec = multi.selectAction(env::Gamemode::Ship, obs, false);
+    expect(cubeDec.holdProb < 0.08f, "Cube hold prob should be very low");
+    expect(shipDec.holdProb > cubeDec.holdProb, "Ship mode must have higher hold prob than Cube");
+
+    std::cout << "[PASS] testClickReleaseHoldActionSpaceAndLowHoldProb (Cube P(H)="
+              << (cubeDec.holdProb * 100.f) << "%, Ship P(H)=" << (shipDec.holdProb * 100.f) << "%)\n";
+}
+
 } // namespace
 
 int main() {
     std::cout << "=== GD-AI RL Master — C++23 Multi-Mode Engine Verification Suite ===\n";
     testOrthogonalInit();
     testFiniteDifferenceGradients();
+    testClickReleaseHoldActionSpaceAndLowHoldProb();
     testGAEComputation();
     testObservationEncoder();
     testRewardRuleNoRewardOnDeath2xNewBest();

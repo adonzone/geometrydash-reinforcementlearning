@@ -90,19 +90,24 @@ void StatsOverlay::refresh() {
 
     const auto& st = mgr.stats();
 
-    // Update live P(HOLD) bar & active hot-swapped gamemode brain every frame
+    // Update live action state, P(HOLD) bar & active hot-swapped gamemode brain every frame
     const float holdP = st.lastHoldProb();
-    const bool holding = (st.lastAction() != 0);
+    const int act = st.lastAction();
+    const char* actStr = (act == 2) ? "HOLD" : (act == 1 ? "CLICK" : "REL");
     m_actionLabel->setString(fmt::format(
-        "P(HOLD): {:2.0f}% [{}] | Brain:{}",
+        "Act: [{}] P(H):{:2.0f}% | Brain:{}",
+        actStr,
         holdP * 100.0f,
-        holding ? "HOLD" : "REL",
         env::gamemodeName(mgr.activeGamemode())
     ).c_str());
-    m_actionLabel->setColor(holding ? ccColor3B{110, 255, 150} : ccColor3B{195, 210, 230});
+    m_actionLabel->setColor(
+        (act == 2) ? ccColor3B{110, 255, 150} :
+        ((act == 1) ? ccColor3B{255, 225, 90} : ccColor3B{195, 210, 230})
+    );
     m_holdGauge->renderGauge(
         holdP,
-        holding ? ccc4f(0.22f, 0.92f, 0.48f, 0.92f) : ccc4f(0.32f, 0.62f, 0.96f, 0.85f)
+        (act == 2) ? ccc4f(0.22f, 0.92f, 0.48f, 0.92f) :
+        ((act == 1) ? ccc4f(0.98f, 0.85f, 0.25f, 0.92f) : ccc4f(0.32f, 0.62f, 0.96f, 0.85f))
     );
 
     // Throttle text & sparkline chart updates slightly to minimize overhead

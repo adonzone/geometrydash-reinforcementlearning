@@ -347,7 +347,7 @@ void AIDashboardPopup::buildModelsTab(CCNode* parent) {
     auto* cfgSummary = CCLabelBMFont::create(
         fmt::format(
             "8x Hot-Swap Brains (342D): 25k params/mode | Swaps: {}\n"
-            "Reward: Death=0x (-1.0 col) | New Best=2x PB (RollPB) + SIL | Master+Per-Mode Checkpoints",
+            "Actions: Rel/Clk/Hld (Low P(H)) | Death=0x (-1.0 col) | New Best=2x PB (RollPB) + SIL",
             multi.hotSwapCount()
         ).c_str(),
         "chatFont.fnt"

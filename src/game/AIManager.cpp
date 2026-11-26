@@ -220,11 +220,11 @@ void AIManager::onPostUpdate(PlayLayer* playLayer, float dt) {
     m_hasPendingDecision = true;
     m_episodeActive = true;
 
-    // Shift 4-step action history buffer
+    // Shift 4-step action history buffer (0.0=Release, 0.5=Click, 1.0=Hold)
     m_recentActions[3] = m_recentActions[2];
     m_recentActions[2] = m_recentActions[1];
     m_recentActions[1] = m_recentActions[0];
-    m_recentActions[0] = (m_pendingDecision.action != 0) ? 1.0f : 0.0f;
+    m_recentActions[0] = (m_pendingDecision.action == 2) ? 1.0f : ((m_pendingDecision.action == 1) ? 0.5f : 0.0f);
 
     GameBridge::applyAction(playLayer, m_pendingDecision.action, m_currentlyHolding);
 }

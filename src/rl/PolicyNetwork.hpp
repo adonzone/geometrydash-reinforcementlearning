@@ -3,6 +3,7 @@
 #include "Adam.hpp"
 #include "Tensor.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <istream>
@@ -17,31 +18,38 @@ struct ForwardCache {
     Vec aH2;
     Vec cH1;
     Vec cH2;
-    float logit0 = 0.0f;
+    std::array<float, 3> logits{0.0f, 0.0f, 0.0f}; // 0 = Release, 1 = Click, 2 = Hold
+    std::array<float, 3> probs{0.75f, 0.20f, 0.05f}; // Softmax action probabilities
+    float releaseProb = 0.75f;
+    float clickProb = 0.20f;
+    float holdProb = 0.05f;                        // Low initial hold probability
+    float logit0 = 0.0f;                           // Compatibility aliases
     float logit1 = 0.0f;
-    float holdProb = 0.5f;
+    float logit2 = 0.0f;
     float value = 0.0f;
 };
 
 /// Decoupled Actor-Critic MLP with orthogonal initialization and Tanh activations.
-/// Actor:  obsDim -> hidden1 -> hidden2 -> 2 logits (RELEASE=0, HOLD=1)
+/// Actor:  obsDim -> hidden1 -> hidden2 -> 3 logits (RELEASE=0, CLICK=1, HOLD=2)
 /// Critic: obsDim -> hidden1 -> hidden2 -> 1 scalar value V(s)
 class PolicyNetwork {
 public:
     PolicyNetwork(std::size_t obsDim, std::size_t hidden1 = 128, std::size_t hidden2 = 64, std::uint32_t seed = 42);
 
     void resetWeights(std::uint32_t seed);
+    void setActionBiases(float releaseBias, float clickBias, float holdBias);
 
     /// Fast forward pass with activation cache (for training & inference).
     ForwardCache forward(const Vec& obs) const;
 
     /// Accumulates gradients for a single transition given scalar sensitivities:
-    /// dLogit0 = dL/d(logit0), dLogit1 = dL/d(logit1), dValue = dL/d(value).
+    /// dLogit0 = dL/d(logit0), dLogit1 = dL/d(logit1), dLogit2 = dL/d(logit2), dValue = dL/d(value).
     void backwardAccumulate(
         const Vec& obs,
         const ForwardCache& cache,
         float dLogit0,
         float dLogit1,
+        float dLogit2,
         float dValue
     );
 

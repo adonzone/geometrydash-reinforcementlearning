@@ -57,6 +57,11 @@ MultiModePPOAgent::MultiModePPOAgent(TrainingPreset preset, std::size_t obsDim, 
     for (std::size_t i = 0; i < kModeCount; ++i) {
         const auto mode = static_cast<env::Gamemode>(i);
         m_agents.emplace_back(makeModeConfig(mode, preset, obsDim, obsNormDim));
+        if (mode == env::Gamemode::Ship || mode == env::Gamemode::Wave) {
+            m_agents.back().mutableNetwork().setActionBiases(0.9f, 0.1f, -1.0f);
+        } else {
+            m_agents.back().mutableNetwork().setActionBiases(1.3f, -0.5f, -2.4f);
+        }
     }
 }
 
@@ -137,7 +142,13 @@ void MultiModePPOAgent::clearAllBuffers() {
 
 void MultiModePPOAgent::resetAll(std::uint32_t baseSeed) {
     for (std::size_t i = 0; i < kModeCount; ++i) {
+        const auto mode = static_cast<env::Gamemode>(i);
         m_agents[i].reset(baseSeed + static_cast<std::uint32_t>(i) * 1009u);
+        if (mode == env::Gamemode::Ship || mode == env::Gamemode::Wave) {
+            m_agents[i].mutableNetwork().setActionBiases(0.9f, 0.1f, -1.0f);
+        } else {
+            m_agents[i].mutableNetwork().setActionBiases(1.3f, -0.5f, -2.4f);
+        }
     }
     m_hotSwapCount = 0;
 }

@@ -192,15 +192,33 @@ std::vector<env::LevelObject> GameBridge::extractNearbyObjects(
 
 void GameBridge::applyAction(PlayLayer* playLayer, int action, bool& currentlyHolding) {
     if (!playLayer || !playLayer->m_player1) return;
-    const bool wantHold = (action != 0);
-    if (wantHold == currentlyHolding) return;
 
-    if (wantHold) {
-        playLayer->m_player1->pushButton(PlayerButton::Jump);
-    } else {
-        playLayer->m_player1->releaseButton(PlayerButton::Jump);
+    switch (action) {
+        case 1: { // CLICK (Crisp 1-tick Tap)
+            if (currentlyHolding) {
+                playLayer->m_player1->releaseButton(PlayerButton::Jump);
+            }
+            playLayer->m_player1->pushButton(PlayerButton::Jump);
+            playLayer->m_player1->releaseButton(PlayerButton::Jump);
+            currentlyHolding = false;
+            break;
+        }
+        case 2: { // HOLD (Sustained thrust / continuous hold)
+            if (!currentlyHolding) {
+                playLayer->m_player1->pushButton(PlayerButton::Jump);
+                currentlyHolding = true;
+            }
+            break;
+        }
+        case 0: // RELEASE (Idle / drop)
+        default: {
+            if (currentlyHolding) {
+                playLayer->m_player1->releaseButton(PlayerButton::Jump);
+                currentlyHolding = false;
+            }
+            break;
+        }
     }
-    currentlyHolding = wantHold;
 }
 
 void GameBridge::releaseAllInputs(PlayLayer* playLayer, bool& currentlyHolding) {

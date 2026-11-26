@@ -10,10 +10,10 @@ PolicyNetwork::PolicyNetwork(std::size_t obsDim, std::size_t hidden1, std::size_
     : m_obsDim(obsDim)
     , m_hidden1(hidden1)
     , m_hidden2(hidden2)
-    , m_aW1(hidden1, obsDim), m_aW2(hidden2, hidden1), m_aW3(2, hidden2)
-    , m_aB1(hidden1, 0.0f), m_aB2(hidden2, 0.0f), m_aB3(2, 0.0f)
-    , m_daW1(hidden1, obsDim), m_daW2(hidden2, hidden1), m_daW3(2, hidden2)
-    , m_daB1(hidden1, 0.0f), m_daB2(hidden2, 0.0f), m_daB3(2, 0.0f)
+    , m_aW1(hidden1, obsDim), m_aW2(hidden2, hidden1), m_aW3(3, hidden2)
+    , m_aB1(hidden1, 0.0f), m_aB2(hidden2, 0.0f), m_aB3(3, 0.0f)
+    , m_daW1(hidden1, obsDim), m_daW2(hidden2, hidden1), m_daW3(3, hidden2)
+    , m_daB1(hidden1, 0.0f), m_daB2(hidden2, 0.0f), m_daB3(3, 0.0f)
     , m_cW1(hidden1, obsDim), m_cW2(hidden2, hidden1), m_cW3(1, hidden2)
     , m_cB1(hidden1, 0.0f), m_cB2(hidden2, 0.0f), m_cB3(1, 0.0f)
     , m_dcW1(hidden1, obsDim), m_dcW2(hidden2, hidden1), m_dcW3(1, hidden2)
@@ -29,7 +29,7 @@ void PolicyNetwork::resetWeights(std::uint32_t seed) {
 
     initOrthogonal(m_aW1, kHiddenGain, rng);
     initOrthogonal(m_aW2, kHiddenGain, rng);
-    initOrthogonal(m_aW3, 0.01f, rng); // near-uniform initial policy
+    initOrthogonal(m_aW3, 0.01f, rng); // near-zero output projection
 
     initOrthogonal(m_cW1, kHiddenGain, rng);
     initOrthogonal(m_cW2, kHiddenGain, rng);
@@ -37,10 +37,22 @@ void PolicyNetwork::resetWeights(std::uint32_t seed) {
 
     std::fill(m_aB1.begin(), m_aB1.end(), 0.0f);
     std::fill(m_aB2.begin(), m_aB2.end(), 0.0f);
-    std::fill(m_aB3.begin(), m_aB3.end(), 0.0f);
+
+    // 3-way action biases: Release=0, Click=1, Hold=2
+    // User requirement: Click/Release/Hold with significantly reduced hold probability (<5% initially)
+    setActionBiases(1.2f, -0.6f, -2.2f);
+
     std::fill(m_cB1.begin(), m_cB1.end(), 0.0f);
     std::fill(m_cB2.begin(), m_cB2.end(), 0.0f);
     std::fill(m_cB3.begin(), m_cB3.end(), 0.0f);
+}
+
+void PolicyNetwork::setActionBiases(float releaseBias, float clickBias, float holdBias) {
+    if (m_aB3.size() >= 3) {
+        m_aB3[0] = releaseBias;
+        m_aB3[1] = clickBias;
+        m_aB3[2] = holdBias;
+    }
 }
 
 ForwardCache PolicyNetwork::forward(const Vec& obs) const {
@@ -57,11 +69,29 @@ ForwardCache PolicyNetwork::forward(const Vec& obs) const {
     linearForward(m_aW2, m_aB2, cache.aH1.data(), cache.aH2.data());
     for (float& v : cache.aH2) v = std::tanh(v);
 
-    float logits[2] = {0.0f, 0.0f};
+    float logits[3] = {0.0f, 0.0f, 0.0f};
     linearForward(m_aW3, m_aB3, cache.aH2.data(), logits);
+    cache.logits[0] = logits[0];
+    cache.logits[1] = logits[1];
+    cache.logits[2] = logits[2];
     cache.logit0 = logits[0];
     cache.logit1 = logits[1];
-    cache.holdProb = sigmoidDiff(logits[0], logits[1]);
+    cache.logit2 = logits[2];
+
+    // Numerically stable 3-class softmax
+    const float maxLogit = std::max({logits[0], logits[1], logits[2]});
+    const float exp0 = std::exp(logits[0] - maxLogit);
+    const float exp1 = std::exp(logits[1] - maxLogit);
+    const float exp2 = std::exp(logits[2] - maxLogit);
+    const float sumExp = exp0 + exp1 + exp2;
+    const float invSum = (sumExp > 0.0f) ? (1.0f / sumExp) : (1.0f / 3.0f);
+
+    cache.probs[0] = exp0 * invSum;
+    cache.probs[1] = exp1 * invSum;
+    cache.probs[2] = exp2 * invSum;
+    cache.releaseProb = cache.probs[0];
+    cache.clickProb   = cache.probs[1];
+    cache.holdProb    = cache.probs[2];
 
     // Critic forward
     linearForward(m_cW1, m_cB1, obs.data(), cache.cH1.data());
@@ -82,11 +112,12 @@ void PolicyNetwork::backwardAccumulate(
     const ForwardCache& cache,
     float dLogit0,
     float dLogit1,
+    float dLogit2,
     float dValue
 ) {
     // --- Actor backward ---
-    if (dLogit0 != 0.0f || dLogit1 != 0.0f) {
-        const float dLogits[2] = {dLogit0, dLogit1};
+    if (dLogit0 != 0.0f || dLogit1 != 0.0f || dLogit2 != 0.0f) {
+        const float dLogits[3] = {dLogit0, dLogit1, dLogit2};
         linearBackward(m_aW3, cache.aH2.data(), dLogits, m_daW3, m_daB3, m_scratchH2.data());
         for (std::size_t i = 0; i < m_hidden2; ++i) {
             const float h = cache.aH2[i];

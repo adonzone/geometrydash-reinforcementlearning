@@ -78,22 +78,44 @@ ActionDecision PPOAgent::selectAction(const Vec& rawObs, bool training) {
     Vec normObs = m_config.normalizeObs ? m_obsNorm.normalize(rawObs) : rawObs;
     const ForwardCache cache = m_net.forward(normObs);
 
-    const float p1 = std::clamp(cache.holdProb, 1e-6f, 1.0f - 1e-6f);
-    const float p0 = 1.0f - p1;
+    const float p0 = std::clamp(cache.probs[0], 1e-6f, 1.0f - 1e-6f);
+    const float p1 = std::clamp(cache.probs[1], 1e-6f, 1.0f - 1e-6f);
+    const float p2 = std::clamp(cache.probs[2], 1e-6f, 1.0f - 1e-6f);
+    const float sumP = p0 + p1 + p2;
+    const float normP0 = p0 / sumP;
+    const float normP1 = p1 / sumP;
+    const float normP2 = p2 / sumP;
 
     int action = 0;
     if (training) {
         std::uniform_real_distribution<float> u(0.0f, 1.0f);
-        action = (u(m_rng) < p1) ? 1 : 0;
+        const float sample = u(m_rng);
+        if (sample < normP0) {
+            action = 0; // RELEASE
+        } else if (sample < normP0 + normP1) {
+            action = 1; // CLICK (TAP)
+        } else {
+            action = 2; // HOLD
+        }
     } else {
-        action = (p1 >= 0.5f) ? 1 : 0;
+        // Deterministic argmax policy for evaluation
+        if (normP0 >= normP1 && normP0 >= normP2) {
+            action = 0; // RELEASE
+        } else if (normP1 >= normP2) {
+            action = 1; // CLICK
+        } else {
+            action = 2; // HOLD
+        }
     }
 
-    const float logProb = std::log(action == 1 ? p1 : p0);
+    const float chosenProb = (action == 0) ? normP0 : (action == 1 ? normP1 : normP2);
+    const float logProb = std::log(std::max(1e-7f, chosenProb));
 
     ActionDecision out;
     out.action = action;
-    out.holdProb = p1;
+    out.releaseProb = normP0;
+    out.clickProb = normP1;
+    out.holdProb = normP2;
     out.logProb = logProb;
     out.value = cache.value;
     out.normObs = std::move(normObs);
@@ -361,19 +383,19 @@ void PPOAgent::runSelfImitationPass(float lr) {
             if (rawAdv <= 1e-4f) continue;
 
             const float adv = std::min(rawAdv, 10.0f);
-            const float p1 = std::clamp(cache.holdProb, 1e-6f, 1.0f - 1e-6f);
-            const float p0 = 1.0f - p1;
+            const int a = std::clamp(sample.action, 0, 2);
 
-            // Minimize -silCoef * adv * log pi(a | s)
-            const float dLogProb_dLogit0 = (sample.action == 0 ? 1.0f : 0.0f) - p0;
-            const float dLogProb_dLogit1 = (sample.action == 1 ? 1.0f : 0.0f) - p1;
-            const float dLogit0 = (-silCoef * adv * dLogProb_dLogit0) * invBatch;
-            const float dLogit1 = (-silCoef * adv * dLogProb_dLogit1) * invBatch;
+            float dLogits[3];
+            for (int i = 0; i < 3; ++i) {
+                const float pi = std::clamp(cache.probs[i], 1e-6f, 1.0f - 1e-6f);
+                const float dLogProb_dLogit = ((i == a) ? 1.0f : 0.0f) - pi;
+                dLogits[i] = (-silCoef * adv * dLogProb_dLogit) * invBatch;
+            }
 
             // Pull V(s) upward toward the proven elite return (Huber-clamped)
             const float dValue = (-vCoef * adv) * invBatch;
 
-            m_net.backwardAccumulate(sample.normObs, cache, dLogit0, dLogit1, dValue);
+            m_net.backwardAccumulate(sample.normObs, cache, dLogits[0], dLogits[1], dLogits[2], dValue);
             ++activeCount;
         }
 
@@ -461,10 +483,11 @@ UpdateMetrics PPOAgent::runPPOUpdate(float bootstrapValue) {
                 const float targetRet = m_buffer.ret(idx);
 
                 const ForwardCache cache = m_net.forward(tr.normObs);
-                const float p1 = std::clamp(cache.holdProb, 1e-6f, 1.0f - 1e-6f);
-                const float p0 = 1.0f - p1;
+                const auto& probs = cache.probs;
+                const int a = std::clamp(tr.action, 0, 2);
+                const float p_chosen = std::clamp(probs[a], 1e-6f, 1.0f - 1e-6f);
 
-                const float newLogProb = std::log(tr.action == 1 ? p1 : p0);
+                const float newLogProb = std::log(p_chosen);
                 const float logRatio = std::clamp(newLogProb - tr.logProb, -20.0f, 20.0f);
                 const float ratio = std::exp(logRatio);
 
@@ -484,16 +507,23 @@ UpdateMetrics PPOAgent::runPPOUpdate(float bootstrapValue) {
 
                 const float dL_dLogProb = useUnclipped ? (-ratio * adv) : 0.0f;
 
-                const float logP0 = std::log(p0);
-                const float logP1 = std::log(p1);
-                const float entropy = -(p0 * logP0 + p1 * logP1);
+                // 3-class categorical entropy: H(p) = - sum_j p_j * log(p_j)
+                float entropy = 0.0f;
+                for (int j = 0; j < 3; ++j) {
+                    const float pj = std::clamp(probs[j], 1e-6f, 1.0f - 1e-6f);
+                    entropy -= pj * std::log(pj);
+                }
 
-                const float dEnt_dLogit1 = -entCoef * p1 * p0 * (logP0 - logP1);
-                const float dLogProb_dLogit0 = (tr.action == 0 ? 1.0f : 0.0f) - p0;
-                const float dLogProb_dLogit1 = (tr.action == 1 ? 1.0f : 0.0f) - p1;
-
-                const float dLogit0 = (dL_dLogProb * dLogProb_dLogit0 - dEnt_dLogit1) * invBatch;
-                const float dLogit1 = (dL_dLogProb * dLogProb_dLogit1 + dEnt_dLogit1) * invBatch;
+                // Exact softmax derivative with entropy regularization:
+                // dLogProb / dLogit_i = (i == a) - p_i
+                // dEntropy / dLogit_i = - p_i * (log(p_i) + entropy)
+                float dLogits[3];
+                for (int i = 0; i < 3; ++i) {
+                    const float pi = std::clamp(probs[i], 1e-6f, 1.0f - 1e-6f);
+                    const float dLogProb_dLogit = ((i == a) ? 1.0f : 0.0f) - pi;
+                    const float dEnt_dLogit = -pi * (std::log(pi) + entropy);
+                    dLogits[i] = (dL_dLogProb * dLogProb_dLogit - entCoef * dEnt_dLogit) * invBatch;
+                }
 
                 // Huber-stabilized clipped value loss to stay robust under 0x death vs 2x PB spikes
                 constexpr float kHuberDelta = 10.0f;
@@ -514,7 +544,7 @@ UpdateMetrics PPOAgent::runPPOUpdate(float bootstrapValue) {
                     dValue = withinClip ? (vCoef * std::clamp(vDiffClipped, -kHuberDelta, kHuberDelta) * invBatch) : 0.0f;
                 }
 
-                m_net.backwardAccumulate(tr.normObs, cache, dLogit0, dLogit1, dValue);
+                m_net.backwardAccumulate(tr.normObs, cache, dLogits[0], dLogits[1], dLogits[2], dValue);
 
                 sumPolicyLoss += policyLoss;
                 sumValueLoss += vLoss;
