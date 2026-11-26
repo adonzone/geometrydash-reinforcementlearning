@@ -343,32 +343,63 @@ void AIDashboardPopup::buildModelsTab(CCNode* parent) {
     addPreset("Fine-Tune", rl::TrainingPreset::FineTunePolish, size.width * 0.80f);
 
     const auto& cfg = mgr.agent().config();
+    const auto& multi = mgr.multiAgent();
     auto* cfgSummary = CCLabelBMFont::create(
         fmt::format(
-            "Architecture: 240D Egocentric -> Actor(128->64->2) + Critic(128->64->1) [{} params]\n"
-            "Horizon: {}  |  Minibatch: {}  |  Epochs: {}  |  LR: {:.1e}  |  Clip: {:.2f}  |  GAE: {:.2f}\n"
-            "Checkpoint: {}",
-            mgr.agent().network().parameterCount(),
-            cfg.rolloutHorizon,
-            cfg.minibatchSize,
-            cfg.epochs,
-            cfg.learningRate,
-            cfg.clipEpsilon,
-            cfg.gaeLambda,
-            mgr.currentModelPath().filename().string()
+            "8x Hot-Swap Brains (342D): 25k params/mode | Swaps: {}\n"
+            "Reward: Death=0x (-1.0 col) | New Best=2x PB (RollPB) + SIL | Master+Per-Mode Checkpoints",
+            multi.hotSwapCount()
         ).c_str(),
         "chatFont.fnt"
     );
     cfgSummary->setAlignment(kCCTextAlignmentCenter);
-    cfgSummary->setScale(0.52f);
-    cfgSummary->setPosition({size.width * 0.5f, size.height - 92.f});
+    cfgSummary->setScale(0.50f);
+    cfgSummary->setPosition({size.width * 0.5f, size.height - 80.f});
     cfgSummary->setColor({205, 226, 248});
     parent->addChild(cfgSummary);
+
+    // Gamemode Training Status & Freeze/Unfreeze Toggles (2 rows of 4)
+    constexpr std::array<env::Gamemode, 8> kModes = {
+        env::Gamemode::Cube, env::Gamemode::Ship, env::Gamemode::Ball, env::Gamemode::UFO,
+        env::Gamemode::Wave, env::Gamemode::Robot, env::Gamemode::Spider, env::Gamemode::Swing
+    };
+    constexpr std::array<const char*, 8> kModeNames = {
+        "Cube", "Ship", "Ball", "UFO", "Wave", "Robot", "Spider", "Swing"
+    };
+
+    for (std::size_t i = 0; i < 8; ++i) {
+        const auto mode = kModes[i];
+        const bool frozen = mgr.isModeTrainingFrozen(mode);
+        const auto upd = multi.agentFor(mode).updateCount();
+        const float colX = size.width * (0.16f + 0.23f * static_cast<float>(i % 4));
+        const float rowY = size.height - (i < 4 ? 112.f : 142.f);
+
+        auto* spr = ButtonSprite::create(
+            fmt::format("{}:{} {}", kModeNames[i], upd, frozen ? "[FRZ]" : "[ON]").c_str(),
+            "chatFont.fnt",
+            frozen ? "GJ_button_06.png" : "GJ_button_02.png",
+            0.55f
+        );
+        spr->setScale(0.50f);
+
+        auto* btn = CCMenuItemExt::createSpriteExtra(
+            spr,
+            [this, &mgr, mode, name = kModeNames[i], frozen](CCObject*) {
+                mgr.setModeTrainingFrozen(mode, !frozen);
+                m_toastLabel->setString(
+                    fmt::format("{} training {}", name, !frozen ? "FROZEN (eval-only)" : "UNFROZEN (learning)").c_str()
+                );
+                this->rebuildTabContent();
+            }
+        );
+        btn->setPosition({colX, rowY});
+        menu->addChild(btn);
+    }
 
     // Model & data action buttons
     auto addActionBtn = [&](const char* title, const char* bg, CCPoint pos, std::function<void()> fn) {
         auto* spr = ButtonSprite::create(title, "bigFont.fnt", bg, 0.52f);
-        spr->setScale(0.55f);
+        spr->setScale(0.52f);
         auto* btn = CCMenuItemExt::createSpriteExtra(
             spr,
             [cb = std::move(fn)](CCObject*) { cb(); }
@@ -377,25 +408,25 @@ void AIDashboardPopup::buildModelsTab(CCNode* parent) {
         menu->addChild(btn);
     };
 
-    addActionBtn("Save Model", "GJ_button_01.png", {size.width * 0.20f, 38.f}, [this, &mgr]() {
+    addActionBtn("Save Master+All", "GJ_button_01.png", {size.width * 0.20f, 32.f}, [this, &mgr]() {
         const bool ok = mgr.saveCurrentModel();
-        m_toastLabel->setString(ok ? "Saved model checkpoint!" : "Failed to save model.");
+        m_toastLabel->setString(ok ? "Saved master bundle & 8 per-mode checkpoints!" : "Failed to save models.");
     });
 
-    addActionBtn("Load Model", "GJ_button_05.png", {size.width * 0.41f, 38.f}, [this, &mgr]() {
+    addActionBtn("Load Master", "GJ_button_05.png", {size.width * 0.41f, 32.f}, [this, &mgr]() {
         const bool ok = mgr.loadCurrentModel();
-        m_toastLabel->setString(ok ? "Loaded saved model checkpoint!" : "No saved checkpoint found yet.");
+        m_toastLabel->setString(ok ? "Loaded master multi-mode checkpoint bundle!" : "No saved checkpoint found.");
         this->rebuildTabContent();
     });
 
-    addActionBtn("Export CSV", "GJ_button_04.png", {size.width * 0.62f, 38.f}, [this, &mgr]() {
+    addActionBtn("Export CSV", "GJ_button_04.png", {size.width * 0.62f, 32.f}, [this, &mgr]() {
         const bool ok = mgr.exportStatsCSV();
         m_toastLabel->setString(ok ? "Exported episode metrics CSV to mod save folder!" : "CSV export failed.");
     });
 
-    addActionBtn("Reset Brain", "GJ_button_06.png", {size.width * 0.83f, 38.f}, [this, &mgr]() {
+    addActionBtn("Reset All", "GJ_button_06.png", {size.width * 0.83f, 32.f}, [this, &mgr]() {
         mgr.resetModelAndStats();
-        m_toastLabel->setString("Reset neural weights & training statistics.");
+        m_toastLabel->setString("Reset all 8 neural brains & training stats.");
         this->rebuildTabContent();
     });
 }

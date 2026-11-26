@@ -82,14 +82,18 @@ void VisionOverlay::refresh(PlayLayer* playLayer) {
         }
     }
 
-    // Draw precision vector rays from player center to nearest hazard & interactive target
+    // Draw precision vector rays from player center to nearest hazard, orb, & interactive target
     const CCPoint pPos = playLayer->m_player1->getPosition();
     if (obs.targets.hasHazard1) {
         const CCPoint hPos{pPos.x + obs.targets.hazard1Dx, pPos.y + obs.targets.hazard1Dy};
         m_draw->drawSegment(pPos, hPos, 0.9f, ccc4f(1.0f, 0.22f, 0.22f, 0.72f));
         m_draw->drawDot(hPos, 2.5f, ccc4f(1.0f, 0.25f, 0.25f, 0.90f));
     }
-    if (obs.targets.hasInteractive) {
+    if (obs.targets.hasOrb) {
+        const CCPoint oPos{pPos.x + obs.targets.orbDx, pPos.y + obs.targets.orbDy};
+        m_draw->drawSegment(pPos, oPos, 0.85f, ccc4f(0.25f, 0.95f, 1.0f, 0.75f));
+        m_draw->drawDot(oPos, 2.4f, ccc4f(0.35f, 0.98f, 1.0f, 0.95f));
+    } else if (obs.targets.hasInteractive) {
         const CCPoint iPos{pPos.x + obs.targets.interactiveDx, pPos.y + obs.targets.interactiveDy};
         m_draw->drawSegment(pPos, iPos, 0.8f, ccc4f(1.0f, 0.84f, 0.18f, 0.70f));
         m_draw->drawDot(iPos, 2.2f, ccc4f(1.0f, 0.88f, 0.25f, 0.90f));

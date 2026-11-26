@@ -79,9 +79,9 @@
         },
         "decision-interval": {
             "name": "Decision Tick Interval",
-            "description": "Number of physics frames between RL policy decisions (1 = every frame, 2 = balanced).",
+            "description": "Number of physics frames between RL policy decisions (1 = every frame for crispest timing, 2 = lower CPU).",
             "type": "int",
-            "default": 2,
+            "default": 1,
             "min": 1,
             "max": 6
         }

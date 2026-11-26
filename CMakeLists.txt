@@ -24,6 +24,7 @@ option(GDAI_BUILD_TESTS "Build standalone C++23 RL engine unit & benchmark tests
 set(GDAI_CORE_SOURCES
     src/rl/PolicyNetwork.cpp
     src/rl/PPOAgent.cpp
+    src/rl/MultiModePPOAgent.cpp
     src/env/Observation.cpp
     src/env/StatsTracker.cpp
 )

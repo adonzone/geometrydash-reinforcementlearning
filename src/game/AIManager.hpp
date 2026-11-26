@@ -3,16 +3,19 @@
 #include "../env/Observation.hpp"
 #include "../env/RewardCalculator.hpp"
 #include "../env/StatsTracker.hpp"
-#include "../rl/PPOAgent.hpp"
+#include "../rl/MultiModePPOAgent.hpp"
 
 #include <Geode/Geode.hpp>
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
 
 namespace gdai::game {
 
-/// Central orchestrator linking Geometry Dash hooks, PPO RL agent, persistence, and UI overlays.
+/// Central orchestrator linking Geometry Dash hooks, 8-gamemode hot-swapping PPO+SIL brains,
+/// 0x-death / 2x-new-best reward shaping, persistence, and UI overlays.
 class AIManager {
 public:
     static AIManager& get();
@@ -60,13 +63,26 @@ public:
     void resetModelAndStats();
     bool exportStatsCSV();
 
+    void setModeTrainingFrozen(env::Gamemode mode, bool frozen) {
+        m_multiAgent.setModeTrainingFrozen(mode, frozen);
+    }
+    bool isModeTrainingFrozen(env::Gamemode mode) const {
+        return m_multiAgent.isModeTrainingFrozen(mode);
+    }
+
+    std::filesystem::path modelsDirectory() const;
+    std::string activeModelPrefix() const;
     std::filesystem::path currentModelPath() const;
+    std::filesystem::path masterBundlePath() const;
     std::filesystem::path statsCSVPath() const;
     std::string activeModelLabel() const;
 
     // Telemetry & vision accessors for UI
     const env::StatsTracker& stats() const { return m_stats; }
-    const rl::PPOAgent& agent() const { return m_agent; }
+    const rl::MultiModePPOAgent& multiAgent() const { return m_multiAgent; }
+    const rl::PPOAgent& agent() const { return m_multiAgent.activeAgent(); }
+    env::Gamemode activeGamemode() const { return m_multiAgent.activeMode(); }
+    bool brokeRecordThisEpisode() const { return m_rewards.brokeRecordThisEpisode(); }
     const env::EncodedObservation& latestObservation() const { return m_latestObs; }
     bool hasValidObservation() const { return m_hasObservation; }
     bool isInLevel() const { return m_inLevel; }
@@ -76,7 +92,7 @@ private:
     void refreshTimeScale();
     void maybeAutoSave(bool force = false);
 
-    rl::PPOAgent m_agent;
+    rl::MultiModePPOAgent m_multiAgent;
     env::RewardCalculator m_rewards;
     env::StatsTracker m_stats;
 
@@ -87,7 +103,7 @@ private:
     bool m_perLevelModel = false;
     bool m_autoSave = true;
     float m_trainingSpeed = 1.0f;
-    int m_decisionInterval = 2;
+    int m_decisionInterval = 1;
     rl::TrainingPreset m_activePreset = rl::TrainingPreset::BalancedMaster;
 
     bool m_inLevel = false;
@@ -95,12 +111,19 @@ private:
     bool m_episodeActive = false;
     bool m_currentlyHolding = false;
     float m_holdDurationSec = 0.0f;
+    float m_prevYVelocity = 0.0f;
+    std::array<float, 4> m_recentActions{0.0f, 0.0f, 0.0f, 0.0f};
     int m_tickCounter = 0;
 
+    bool m_hasTrackedHazard = false;
+    float m_trackedHazardX = 0.0f;
+
+    std::uint64_t m_episodeId = 1;
     int m_currentLevelId = 0;
     std::string m_currentLevelName = "None";
 
     bool m_hasPendingDecision = false;
+    env::Gamemode m_pendingMode = env::Gamemode::Cube;
     rl::ActionDecision m_pendingDecision;
 
     bool m_hasObservation = false;

@@ -60,12 +60,16 @@ void StatsTracker::onStep(
 }
 
 void StatsTracker::onEpisodeEnd(float finalPercent, bool completed, Gamemode mode) {
+    onEpisodeEnd(finalPercent, completed, mode, m_currentEpisodeReward);
+}
+
+void StatsTracker::onEpisodeEnd(float finalPercent, bool completed, Gamemode mode, float finalizedEpisodeReward) {
     const float clampedPct = completed ? 100.0f : std::clamp(finalPercent, 0.0f, 100.0f);
     if (clampedPct > m_bestPercent) {
         m_bestPercent = clampedPct;
     }
-    if (m_currentEpisodeReward > m_bestReward) {
-        m_bestReward = m_currentEpisodeReward;
+    if (finalizedEpisodeReward > m_bestReward) {
+        m_bestReward = finalizedEpisodeReward;
     }
 
     ++m_totalEpisodes;
@@ -76,12 +80,12 @@ void StatsTracker::onEpisodeEnd(float finalPercent, bool completed, Gamemode mod
     }
 
     m_lastEpisodePercent = clampedPct;
-    m_lastEpisodeReward = m_currentEpisodeReward;
+    m_lastEpisodeReward = finalizedEpisodeReward;
 
     EpisodeRecord rec;
     rec.episodeIndex = m_totalEpisodes;
     rec.progressPercent = clampedPct;
-    rec.totalReward = m_currentEpisodeReward;
+    rec.totalReward = finalizedEpisodeReward;
     rec.steps = m_currentEpisodeSteps;
     rec.completed = completed;
     rec.deathMode = mode;

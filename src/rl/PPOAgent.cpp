@@ -9,13 +9,15 @@ namespace gdai::rl {
 
 namespace {
 constexpr std::uint32_t kModelMagic = 0x49414447; // "GDAI"
-constexpr std::uint32_t kModelVersion = 1;
+constexpr std::uint32_t kModelVersion = 2;
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
+constexpr std::size_t kMaxPendingEpisodeSteps = 4096;
 } // namespace
 
-PPOConfig PPOConfig::fromPreset(TrainingPreset preset, std::size_t obsDim) {
+PPOConfig PPOConfig::fromPreset(TrainingPreset preset, std::size_t obsDim, std::size_t obsNormDim) {
     PPOConfig cfg;
     cfg.obsDim = obsDim;
+    cfg.obsNormDim = obsNormDim;
     switch (preset) {
         case TrainingPreset::FastLearner:
             cfg.rolloutHorizon = 256;
@@ -26,6 +28,8 @@ PPOConfig PPOConfig::fromPreset(TrainingPreset preset, std::size_t obsDim) {
             cfg.entropyCoefStart = 0.03f;
             cfg.entropyCoefEnd = 0.005f;
             cfg.clipEpsilon = 0.22f;
+            cfg.silCoef = 0.20f;
+            cfg.silBatches = 2;
             break;
         case TrainingPreset::BalancedMaster:
             cfg.rolloutHorizon = 512;
@@ -36,6 +40,8 @@ PPOConfig PPOConfig::fromPreset(TrainingPreset preset, std::size_t obsDim) {
             cfg.entropyCoefStart = 0.025f;
             cfg.entropyCoefEnd = 0.003f;
             cfg.clipEpsilon = 0.2f;
+            cfg.silCoef = 0.16f;
+            cfg.silBatches = 2;
             break;
         case TrainingPreset::FineTunePolish:
             cfg.rolloutHorizon = 1024;
@@ -47,6 +53,8 @@ PPOConfig PPOConfig::fromPreset(TrainingPreset preset, std::size_t obsDim) {
             cfg.entropyCoefEnd = 0.001f;
             cfg.clipEpsilon = 0.12f;
             cfg.targetKL = 0.015f;
+            cfg.silCoef = 0.10f;
+            cfg.silBatches = 1;
             break;
     }
     return cfg;
@@ -55,10 +63,12 @@ PPOConfig PPOConfig::fromPreset(TrainingPreset preset, std::size_t obsDim) {
 PPOAgent::PPOAgent(PPOConfig config)
     : m_config(config)
     , m_net(config.obsDim, config.hidden1, config.hidden2, config.seed)
-    , m_obsNorm(config.obsDim)
+    , m_obsNorm(config.obsDim, config.obsNormDim)
     , m_buffer(config.rolloutHorizon)
     , m_rng(config.seed + 9973u) {
     m_optim.registerParams(m_net.paramSlots());
+    m_pendingEpisode.reserve(512);
+    m_eliteSamples.reserve(config.maxEliteSamples);
 }
 
 ActionDecision PPOAgent::selectAction(const Vec& rawObs, bool training) {
@@ -90,6 +100,12 @@ ActionDecision PPOAgent::selectAction(const Vec& rawObs, bool training) {
     return out;
 }
 
+float PPOAgent::estimateValue(const Vec& rawObs) const {
+    if (rawObs.size() != m_config.obsDim) return 0.0f;
+    const Vec normObs = m_config.normalizeObs ? m_obsNorm.normalize(rawObs) : rawObs;
+    return m_net.forward(normObs).value;
+}
+
 std::optional<UpdateMetrics> PPOAgent::recordTransition(
     const ActionDecision& decision,
     float reward,
@@ -119,6 +135,90 @@ std::optional<UpdateMetrics> PPOAgent::recordTransition(
     return runPPOUpdate(bootstrapValue);
 }
 
+void PPOAgent::stageTransition(
+    const ActionDecision& decision,
+    float rawReward,
+    bool done,
+    bool truncated,
+    float bootstrapValue,
+    std::uint64_t episodeId
+) {
+    Transition t;
+    t.normObs = decision.normObs;
+    t.action = decision.action;
+    t.logProb = decision.logProb;
+    t.value = decision.value;
+    t.reward = rawReward;
+    t.done = done;
+    t.truncated = truncated;
+    t.bootstrapValue = bootstrapValue;
+    t.episodeId = episodeId;
+
+    if (m_trainingFrozen) {
+        ++m_totalSteps;
+        return;
+    }
+
+    if (m_pendingEpisode.size() >= kMaxPendingEpisodeSteps) {
+        // Safety cap for extraordinarily long survival runs: drop oldest staged element
+        m_pendingEpisode.erase(m_pendingEpisode.begin());
+    }
+    m_pendingEpisode.push_back(std::move(t));
+    ++m_totalSteps;
+}
+
+std::optional<UpdateMetrics> PPOAgent::finalizeEpisode(
+    std::uint64_t episodeId,
+    float rewardMultiplier,
+    float episodeScore,
+    bool saveToElite,
+    std::size_t fatalTrimSteps,
+    float bootstrapValue
+) {
+    if (m_pendingEpisode.empty()) {
+        return std::nullopt;
+    }
+
+    std::vector<Transition> epTransitions;
+    epTransitions.reserve(m_pendingEpisode.size());
+
+    std::vector<Transition> remaining;
+    for (auto& tr : m_pendingEpisode) {
+        if (tr.episodeId == episodeId) {
+            if (rewardMultiplier == 0.0f) {
+                // Zero out all progress rewards on death without a new best,
+                // while preserving the negative terminal collision penalty (-1.0)
+                if (!tr.done) {
+                    tr.reward = 0.0f;
+                }
+            } else {
+                tr.reward *= rewardMultiplier;
+            }
+            epTransitions.push_back(std::move(tr));
+        } else {
+            remaining.push_back(std::move(tr));
+        }
+    }
+    m_pendingEpisode = std::move(remaining);
+
+    if (epTransitions.empty() || m_trainingFrozen) {
+        return std::nullopt;
+    }
+
+    if (saveToElite && m_config.maxEliteSamples > 0) {
+        storeEliteTrajectory(epTransitions, episodeScore, fatalTrimSteps);
+    }
+
+    for (auto& tr : epTransitions) {
+        m_buffer.add(std::move(tr));
+    }
+
+    if (m_buffer.full()) {
+        return runPPOUpdate(bootstrapValue);
+    }
+    return std::nullopt;
+}
+
 std::optional<UpdateMetrics> PPOAgent::forceUpdate(float bootstrapValue) {
     if (m_buffer.size() < std::max<std::size_t>(16, m_config.minibatchSize / 2)) {
         return std::nullopt;
@@ -128,6 +228,7 @@ std::optional<UpdateMetrics> PPOAgent::forceUpdate(float bootstrapValue) {
 
 void PPOAgent::clearBuffer() {
     m_buffer.clear();
+    m_pendingEpisode.clear();
 }
 
 void PPOAgent::reset(std::uint32_t newSeed) {
@@ -136,8 +237,10 @@ void PPOAgent::reset(std::uint32_t newSeed) {
     }
     m_net.resetWeights(m_config.seed);
     m_optim.resetState();
-    m_obsNorm.reset(m_config.obsDim);
+    m_obsNorm.reset(m_config.obsDim, m_config.obsNormDim);
     m_buffer.clear();
+    m_pendingEpisode.clear();
+    m_eliteSamples.clear();
     m_rng.seed(m_config.seed + 9973u);
     m_totalSteps = 0;
     m_updateCount = 0;
@@ -145,7 +248,7 @@ void PPOAgent::reset(std::uint32_t newSeed) {
 }
 
 void PPOAgent::applyPreset(TrainingPreset preset) {
-    const auto p = PPOConfig::fromPreset(preset, m_config.obsDim);
+    const auto p = PPOConfig::fromPreset(preset, m_config.obsDim, m_config.obsNormDim);
     m_config.rolloutHorizon = p.rolloutHorizon;
     m_config.minibatchSize = p.minibatchSize;
     m_config.epochs = p.epochs;
@@ -155,6 +258,8 @@ void PPOAgent::applyPreset(TrainingPreset preset) {
     m_config.entropyCoefEnd = p.entropyCoefEnd;
     m_config.clipEpsilon = p.clipEpsilon;
     m_config.targetKL = p.targetKL;
+    m_config.silCoef = p.silCoef;
+    m_config.silBatches = p.silBatches;
     m_buffer.resize(m_config.rolloutHorizon);
 }
 
@@ -168,7 +273,6 @@ float PPOAgent::currentLearningRate() const {
         1.0f,
         static_cast<float>(m_updateCount) / static_cast<float>(m_config.lrAnnealUpdates)
     );
-    // Cosine annealing from learningRate down to minLearningRate
     const float cosFactor = 0.5f * (1.0f + std::cos(3.1415926535f * progress));
     return m_config.minLearningRate + (m_config.learningRate - m_config.minLearningRate) * cosFactor;
 }
@@ -180,6 +284,103 @@ float PPOAgent::currentEntropyCoef() const {
         static_cast<float>(m_updateCount) / static_cast<float>(m_config.entropyAnnealUpdates)
     );
     return m_config.entropyCoefStart + (m_config.entropyCoefEnd - m_config.entropyCoefStart) * progress;
+}
+
+void PPOAgent::storeEliteTrajectory(
+    const std::vector<Transition>& episode,
+    float episodeScore,
+    std::size_t fatalTrimSteps
+) {
+    const std::size_t n = episode.size();
+    if (n <= fatalTrimSteps) return;
+
+    // Compute exact discounted Monte-Carlo returns along the winning trajectory
+    std::vector<float> returns(n, 0.0f);
+    float runningRet = 0.0f;
+    for (std::size_t rev = 0; rev < n; ++rev) {
+        const std::size_t t = n - 1 - rev;
+        const auto& tr = episode[t];
+        if (tr.done) {
+            runningRet = tr.reward;
+        } else if (tr.truncated) {
+            runningRet = tr.reward + m_config.gamma * tr.bootstrapValue;
+        } else {
+            runningRet = tr.reward + m_config.gamma * runningRet;
+        }
+        returns[t] = runningRet;
+    }
+
+    const std::size_t keepCount = n - fatalTrimSteps;
+    for (std::size_t t = 0; t < keepCount; ++t) {
+        if (returns[t] <= 0.0f) continue;
+        EliteSample sample;
+        sample.normObs = episode[t].normObs;
+        sample.action = episode[t].action;
+        sample.discountedReturn = returns[t];
+        sample.episodeScore = episodeScore;
+        m_eliteSamples.push_back(std::move(sample));
+    }
+
+    // Keep the highest-scoring / freshest elite transitions within capacity
+    if (m_eliteSamples.size() > m_config.maxEliteSamples) {
+        std::stable_sort(
+            m_eliteSamples.begin(),
+            m_eliteSamples.end(),
+            [](const EliteSample& a, const EliteSample& b) {
+                return a.episodeScore > b.episodeScore;
+            }
+        );
+        m_eliteSamples.resize(m_config.maxEliteSamples);
+    }
+}
+
+void PPOAgent::runSelfImitationPass(float lr) {
+    if (m_eliteSamples.empty() || m_config.silCoef <= 0.0f || m_config.silBatches == 0) {
+        return;
+    }
+
+    const std::size_t eliteN = m_eliteSamples.size();
+    const std::size_t batchLen = std::min(m_config.minibatchSize, eliteN);
+    if (batchLen < 4) return;
+
+    std::uniform_int_distribution<std::size_t> dist(0, eliteN - 1);
+    const float invBatch = 1.0f / static_cast<float>(batchLen);
+    const float silCoef = m_config.silCoef;
+    const float vCoef = m_config.valueLossCoef;
+
+    for (std::size_t b = 0; b < m_config.silBatches; ++b) {
+        m_optim.zeroGrad();
+        std::size_t activeCount = 0;
+
+        for (std::size_t k = 0; k < batchLen; ++k) {
+            const auto& sample = m_eliteSamples[dist(m_rng)];
+            const ForwardCache cache = m_net.forward(sample.normObs);
+
+            // SIL only imitates when elite return strictly beats current critic estimate
+            const float rawAdv = sample.discountedReturn - cache.value;
+            if (rawAdv <= 1e-4f) continue;
+
+            const float adv = std::min(rawAdv, 10.0f);
+            const float p1 = std::clamp(cache.holdProb, 1e-6f, 1.0f - 1e-6f);
+            const float p0 = 1.0f - p1;
+
+            // Minimize -silCoef * adv * log pi(a | s)
+            const float dLogProb_dLogit0 = (sample.action == 0 ? 1.0f : 0.0f) - p0;
+            const float dLogProb_dLogit1 = (sample.action == 1 ? 1.0f : 0.0f) - p1;
+            const float dLogit0 = (-silCoef * adv * dLogProb_dLogit0) * invBatch;
+            const float dLogit1 = (-silCoef * adv * dLogProb_dLogit1) * invBatch;
+
+            // Pull V(s) upward toward the proven elite return (Huber-clamped)
+            const float dValue = (-vCoef * adv) * invBatch;
+
+            m_net.backwardAccumulate(sample.normObs, cache, dLogit0, dLogit1, dValue);
+            ++activeCount;
+        }
+
+        if (activeCount > 0) {
+            m_optim.step(lr * 0.65f, m_config.maxGradNorm);
+        }
+    }
 }
 
 UpdateMetrics PPOAgent::runPPOUpdate(float bootstrapValue) {
@@ -271,7 +472,7 @@ UpdateMetrics PPOAgent::runPPOUpdate(float bootstrapValue) {
                 const float approxKL = (ratio - 1.0f) - logRatio;
                 batchKL += approxKL;
 
-                // Clipped PPO surrogate objective (we minimize L = -min(surr1, surr2))
+                // Clipped PPO surrogate objective
                 const float surr1 = ratio * adv;
                 const float clippedRatio = std::clamp(ratio, 1.0f - clipEps, 1.0f + clipEps);
                 const float surr2 = clippedRatio * adv;
@@ -281,29 +482,21 @@ UpdateMetrics PPOAgent::runPPOUpdate(float bootstrapValue) {
                     sumClipped += 1.0;
                 }
 
-                // Gradient of policy loss w.r.t. newLogProb:
-                // d(-ratio * adv)/d(newLogProb) = -ratio * adv if active, else 0.
                 const float dL_dLogProb = useUnclipped ? (-ratio * adv) : 0.0f;
 
-                // Entropy H = -(p0 * log p0 + p1 * log p1)
                 const float logP0 = std::log(p0);
                 const float logP1 = std::log(p1);
                 const float entropy = -(p0 * logP0 + p1 * logP1);
 
-                // Gradient of (-entCoef * H) w.r.t. logits:
-                // dH/d(logit1) = p1 * p0 * (logP0 - logP1), dH/d(logit0) = -dH/d(logit1)
-                // So d(-entCoef * H)/d(logit1) = -entCoef * p1 * p0 * (logP0 - logP1)
                 const float dEnt_dLogit1 = -entCoef * p1 * p0 * (logP0 - logP1);
-
-                // Gradient of newLogProb w.r.t. logits:
-                // d(log p_a)/d(logit_i) = (1_{i==a} - p_i)
                 const float dLogProb_dLogit0 = (tr.action == 0 ? 1.0f : 0.0f) - p0;
                 const float dLogProb_dLogit1 = (tr.action == 1 ? 1.0f : 0.0f) - p1;
 
                 const float dLogit0 = (dL_dLogProb * dLogProb_dLogit0 - dEnt_dLogit1) * invBatch;
                 const float dLogit1 = (dL_dLogProb * dLogProb_dLogit1 + dEnt_dLogit1) * invBatch;
 
-                // Clipped value loss: 0.5 * max((V - R)^2, (V_clipped - R)^2)
+                // Huber-stabilized clipped value loss to stay robust under 0x death vs 2x PB spikes
+                constexpr float kHuberDelta = 10.0f;
                 const float vDiff = cache.value - targetRet;
                 const float vLossUnclipped = 0.5f * vDiff * vDiff;
                 const float vClipped = tr.value + std::clamp(cache.value - tr.value, -vClipEps, vClipEps);
@@ -314,12 +507,11 @@ UpdateMetrics PPOAgent::runPPOUpdate(float bootstrapValue) {
                 float dValue = 0.0f;
                 if (vLossUnclipped >= vLossClipped) {
                     vLoss = vLossUnclipped;
-                    dValue = vCoef * vDiff * invBatch;
+                    dValue = vCoef * std::clamp(vDiff, -kHuberDelta, kHuberDelta) * invBatch;
                 } else {
                     vLoss = vLossClipped;
-                    // Derivative is non-zero only if value wasn't saturated at the clip boundary
                     const bool withinClip = std::abs(cache.value - tr.value) <= vClipEps;
-                    dValue = withinClip ? (vCoef * vDiffClipped * invBatch) : 0.0f;
+                    dValue = withinClip ? (vCoef * std::clamp(vDiffClipped, -kHuberDelta, kHuberDelta) * invBatch) : 0.0f;
                 }
 
                 m_net.backwardAccumulate(tr.normObs, cache, dLogit0, dLogit1, dValue);
@@ -342,6 +534,9 @@ UpdateMetrics PPOAgent::runPPOUpdate(float bootstrapValue) {
             }
         }
     }
+
+    // Reinforce proven 2x new-best & completion runs via Self-Imitation Learning
+    runSelfImitationPass(lr);
 
     m_buffer.clear();
     ++m_updateCount;
@@ -401,7 +596,7 @@ bool PPOAgent::loadModel(const std::filesystem::path& path) {
     if (!readPod(is, magic) || !readPod(is, version) || !readPod(is, steps) || !readPod(is, updates)) {
         return false;
     }
-    if (magic != kModelMagic || version != kModelVersion) {
+    if (magic != kModelMagic || (version != kModelVersion && version != 1)) {
         return false;
     }
 
@@ -412,7 +607,7 @@ bool PPOAgent::loadModel(const std::filesystem::path& path) {
     checksum = fnv1aUpdate(checksum, &updates, sizeof(updates));
 
     PolicyNetwork tmpNet(m_config.obsDim, m_config.hidden1, m_config.hidden2, m_config.seed);
-    RunningMeanStd tmpNorm(m_config.obsDim);
+    RunningMeanStd tmpNorm(m_config.obsDim, m_config.obsNormDim);
     if (!tmpNet.load(is, checksum) || !tmpNorm.load(is, checksum)) {
         return false;
     }
@@ -426,6 +621,7 @@ bool PPOAgent::loadModel(const std::filesystem::path& path) {
     m_obsNorm = std::move(tmpNorm);
     m_optim.registerParams(m_net.paramSlots());
     m_buffer.clear();
+    m_pendingEpisode.clear();
     m_totalSteps = steps;
     m_updateCount = updates;
     return true;

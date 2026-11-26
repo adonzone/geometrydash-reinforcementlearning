@@ -45,6 +45,7 @@ public:
     );
 
     void onEpisodeEnd(float finalPercent, bool completed, Gamemode mode);
+    void onEpisodeEnd(float finalPercent, bool completed, Gamemode mode, float finalizedEpisodeReward);
     void onPPOUpdate(const rl::UpdateMetrics& metrics);
 
     // Rolling aggregates

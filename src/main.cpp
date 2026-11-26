@@ -37,7 +37,7 @@ $on_mod(Loaded) {
     });
 
     log::info(
-        "[GD-AI RL Master] Loaded! PPO Actor-Critic ({} params, {}D egocentric observation).",
+        "[GD-AI RL Master] Loaded! 8x Gamemode Hot-Swap PPO+SIL ({} params/mode, {}D egocentric observation).",
         mgr.agent().network().parameterCount(),
         mgr.agent().config().obsDim
     );

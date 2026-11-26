@@ -90,14 +90,14 @@ void StatsOverlay::refresh() {
 
     const auto& st = mgr.stats();
 
-    // Update live P(HOLD) bar every frame for snappy visual feedback
+    // Update live P(HOLD) bar & active hot-swapped gamemode brain every frame
     const float holdP = st.lastHoldProb();
     const bool holding = (st.lastAction() != 0);
     m_actionLabel->setString(fmt::format(
-        "P(HOLD): {:2.0f}% [{}] | {}",
+        "P(HOLD): {:2.0f}% [{}] | Brain:{}",
         holdP * 100.0f,
         holding ? "HOLD" : "REL",
-        env::gamemodeName(st.currentGamemode())
+        env::gamemodeName(mgr.activeGamemode())
     ).c_str());
     m_actionLabel->setColor(holding ? ccColor3B{110, 255, 150} : ccColor3B{195, 210, 230});
     m_holdGauge->renderGauge(
@@ -113,19 +113,23 @@ void StatsOverlay::refresh() {
         m_statusBadge->setString("OFF");
         m_statusBadge->setColor({235, 120, 120});
     } else if (mgr.isTrainingMode()) {
-        m_statusBadge->setString(fmt::format("TRAIN {:.1f}x", mgr.trainingSpeed()).c_str());
-        m_statusBadge->setColor({95, 250, 145});
+        m_statusBadge->setString(fmt::format(
+            "TRAIN {:.1f}x{}",
+            mgr.trainingSpeed(),
+            mgr.brokeRecordThisEpisode() ? " 2xPB!" : ""
+        ).c_str());
+        m_statusBadge->setColor(mgr.brokeRecordThisEpisode() ? ccColor3B{255, 225, 90} : ccColor3B{95, 250, 145});
     } else {
         m_statusBadge->setString("EVAL PLAY");
         m_statusBadge->setColor({95, 215, 255});
     }
 
     m_line1->setString(fmt::format(
-        "Ep:{} | Upd:{} | Win:{} ({:.0f}%)",
+        "Ep:{} | Upd:{} | Win:{} | Swp:{}",
         st.totalEpisodes(),
-        st.totalUpdates(),
+        mgr.multiAgent().totalUpdatesAll(),
         st.totalCompletions(),
-        st.rollingWinRate(50)
+        mgr.multiAgent().hotSwapCount()
     ).c_str());
 
     m_line2->setString(fmt::format(
@@ -136,20 +140,21 @@ void StatsOverlay::refresh() {
     ).c_str());
 
     m_line3->setString(fmt::format(
-        "Rew:{:+.1f} (Avg {:+.1f}) | V:{:+.1f}",
-        st.currentEpisodeReward(),
+        "LastR:{:+.1f} | AvgR:{:+.1f} | V:{:+.1f}",
+        st.lastEpisodeReward(),
         st.rollingAvgReward(20),
         st.lastValueEstimate()
     ).c_str());
 
-    const auto& u = st.lastUpdate();
+    const auto& activeAgent = mgr.agent();
+    const auto& u = activeAgent.lastMetrics();
     m_line4->setString(fmt::format(
-        "P:{:.3f} V:{:.2f} Ent:{:.2f} Buf:{}/{}",
+        "P:{:.3f} Ent:{:.2f} SIL:{} Buf:{}/{}",
         u.policyLoss,
-        u.valueLoss,
         u.entropy,
-        mgr.agent().bufferFill(),
-        mgr.agent().bufferCapacity()
+        activeAgent.eliteCount(),
+        activeAgent.bufferFill(),
+        activeAgent.bufferCapacity()
     ).c_str());
 
     ChartSeries rawPct;

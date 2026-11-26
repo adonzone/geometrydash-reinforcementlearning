@@ -14,7 +14,11 @@ AIManager& AIManager::get() {
 }
 
 AIManager::AIManager()
-    : m_agent(rl::PPOConfig::fromPreset(rl::TrainingPreset::BalancedMaster, env::EncodedObservation::kTotalDim)) {}
+    : m_multiAgent(
+          rl::TrainingPreset::BalancedMaster,
+          env::EncodedObservation::kTotalDim,
+          env::EncodedObservation::kContinuousNormDim
+      ) {}
 
 void AIManager::initFromSettings() {
     syncFromSettings();
@@ -35,17 +39,35 @@ void AIManager::syncFromSettings() {
     m_decisionInterval = static_cast<int>(mod->getSettingValue<int64_t>("decision-interval"));
 
     const float lrScaled = static_cast<float>(mod->getSettingValue<double>("learning-rate"));
-    m_agent.setLearningRate(lrScaled * 1e-4f);
+    m_multiAgent.setLearningRateAll(lrScaled * 1e-4f);
 
     refreshTimeScale();
 }
 
-std::filesystem::path AIManager::currentModelPath() const {
-    const auto baseDir = std::filesystem::path(Mod::get()->getSaveDir().native()) / "models";
+std::filesystem::path AIManager::modelsDirectory() const {
+    return std::filesystem::path(Mod::get()->getSaveDir().native()) / "models";
+}
+
+std::string AIManager::activeModelPrefix() const {
     if (m_perLevelModel && m_currentLevelId != 0) {
-        return baseDir / fmt::format("level_{}.gdai", m_currentLevelId);
+        return fmt::format("level_{}", m_currentLevelId);
     }
-    return baseDir / "master_general.gdai";
+    return "master";
+}
+
+std::filesystem::path AIManager::currentModelPath() const {
+    return rl::MultiModePPOAgent::modelPathFor(
+        modelsDirectory(),
+        activeModelPrefix(),
+        m_multiAgent.activeMode()
+    );
+}
+
+std::filesystem::path AIManager::masterBundlePath() const {
+    return rl::MultiModePPOAgent::masterBundlePathFor(
+        modelsDirectory(),
+        activeModelPrefix()
+    );
 }
 
 std::filesystem::path AIManager::statsCSVPath() const {
@@ -53,10 +75,11 @@ std::filesystem::path AIManager::statsCSVPath() const {
 }
 
 std::string AIManager::activeModelLabel() const {
+    const char* modeStr = env::gamemodeName(m_multiAgent.activeMode());
     if (m_perLevelModel && m_currentLevelId != 0) {
-        return fmt::format("Level #{}", m_currentLevelId);
+        return fmt::format("Lvl #{} [{}]", m_currentLevelId, modeStr);
     }
-    return "Master Brain";
+    return fmt::format("Master [{}]", modeStr);
 }
 
 void AIManager::onEnterLevel(PlayLayer* playLayer) {
@@ -65,9 +88,14 @@ void AIManager::onEnterLevel(PlayLayer* playLayer) {
     m_episodeActive = true;
     m_currentlyHolding = false;
     m_holdDurationSec = 0.0f;
+    m_prevYVelocity = 0.0f;
+    m_recentActions = {0.0f, 0.0f, 0.0f, 0.0f};
     m_tickCounter = 0;
+    m_hasTrackedHazard = false;
+    m_trackedHazardX = 0.0f;
     m_hasPendingDecision = false;
     m_hasObservation = false;
+    ++m_episodeId;
 
     if (playLayer && playLayer->m_level) {
         m_currentLevelId = playLayer->m_level->m_levelID.value();
@@ -79,14 +107,20 @@ void AIManager::onEnterLevel(PlayLayer* playLayer) {
 
     m_stats.onLevelChanged(m_currentLevelId, m_currentLevelName);
     m_rewards.onLevelStart();
-    m_agent.clearBuffer();
+    m_multiAgent.clearAllBuffers();
+    m_multiAgent.resetHotSwapCount();
 
     if (m_perLevelModel) {
         loadCurrentModel();
     }
 
     refreshTimeScale();
-    log::info("[GD-AI] Entered level '{}' (ID: {}) | Model: {}", m_currentLevelName, m_currentLevelId, activeModelLabel());
+    log::info(
+        "[GD-AI] Entered level '{}' (ID: {}) | Hot-Swap Brain: {} (8 gamemode models ready)",
+        m_currentLevelName,
+        m_currentLevelId,
+        activeModelLabel()
+    );
 }
 
 void AIManager::onPostUpdate(PlayLayer* playLayer, float dt) {
@@ -110,22 +144,44 @@ void AIManager::onPostUpdate(PlayLayer* playLayer, float dt) {
     }
     m_tickCounter = 0;
 
-    // 1. Extract state & encode 240D egocentric observation
-    const auto playerState = GameBridge::extractPlayerState(playLayer, m_currentlyHolding, m_holdDurationSec);
+    // 1. Extract enriched player state & encode 342D egocentric observation
+    auto playerState = GameBridge::extractPlayerState(playLayer, m_currentlyHolding, m_holdDurationSec);
+    playerState.prevYVelocity = m_prevYVelocity;
+    playerState.recentActions = m_recentActions;
+    m_prevYVelocity = playerState.yVelocity;
+
     const auto nearbyObjects = GameBridge::extractNearbyObjects(playLayer, playerState.x, playerState.y);
     const float groundY = playLayer->m_groundLayer ? playLayer->m_groundLayer->getPositionY() : 0.0f;
 
     m_latestObs = env::ObservationEncoder::encode(playerState, nearbyObjects, groundY);
     m_hasObservation = true;
 
+    // Detect clean hazard clearance (player safely passed the previously tracked nearest hazard)
+    bool clearedHazard = false;
+    if (m_hasTrackedHazard && playerState.x > m_trackedHazardX + 12.0f) {
+        clearedHazard = true;
+        m_hasTrackedHazard = false;
+    }
+    if (m_latestObs.targets.hasHazard1 && m_latestObs.targets.hazard1Dx > 0.0f && m_latestObs.targets.hazard1Dx < 180.0f) {
+        const float nextHazX = playerState.x + m_latestObs.targets.hazard1Dx;
+        if (!m_hasTrackedHazard || nextHazX < m_trackedHazardX) {
+            m_trackedHazardX = nextHazX;
+            m_hasTrackedHazard = true;
+        }
+    }
+
     const float pct = GameBridge::currentPercent(playLayer);
 
-    // 2. Close previous step transition with dense shaped reward
+    // 2. Stage previous transition on the gamemode model that took it (handling hot-swaps cleanly!)
     if (m_hasPendingDecision && m_episodeActive) {
-        const float stepReward = m_rewards.computeStepReward(playerState.x, m_pendingDecision.action);
+        const float rawStepReward = m_rewards.computeStepReward(
+            playerState.x,
+            m_pendingDecision.action,
+            clearedHazard
+        );
         m_stats.onStep(
             pct,
-            stepReward,
+            rawStepReward,
             m_pendingDecision.action,
             m_pendingDecision.holdProb,
             m_pendingDecision.value,
@@ -133,23 +189,42 @@ void AIManager::onPostUpdate(PlayLayer* playLayer, float dt) {
         );
 
         if (m_trainingMode) {
-            auto maybeMetrics = m_agent.recordTransition(
+            const bool modeSwapped = (playerState.mode != m_pendingMode);
+            const float portalBootstrap = modeSwapped
+                ? m_multiAgent.estimateValue(playerState.mode, m_latestObs.vec)
+                : 0.0f;
+
+            m_multiAgent.stageTransition(
+                m_pendingMode,
                 m_pendingDecision,
-                stepReward,
+                rawStepReward,
                 false,
-                &m_latestObs.vec
+                modeSwapped,
+                portalBootstrap,
+                m_episodeId
             );
-            if (maybeMetrics) {
-                m_stats.onPPOUpdate(*maybeMetrics);
-                maybeAutoSave(false);
-            }
         }
     }
 
-    // 3. Query PPO policy for next action and apply it to PlayerObject
-    m_pendingDecision = m_agent.selectAction(m_latestObs.vec, m_trainingMode);
+    // 3. Hot-swap to current gamemode's dedicated model and select next action
+    if (m_multiAgent.setActiveMode(playerState.mode)) {
+        log::debug(
+            "[GD-AI] Hot-swapped brain -> {} model (swap #{})",
+            env::gamemodeName(playerState.mode),
+            m_multiAgent.hotSwapCount()
+        );
+    }
+
+    m_pendingDecision = m_multiAgent.selectAction(playerState.mode, m_latestObs.vec, m_trainingMode);
+    m_pendingMode = playerState.mode;
     m_hasPendingDecision = true;
     m_episodeActive = true;
+
+    // Shift 4-step action history buffer
+    m_recentActions[3] = m_recentActions[2];
+    m_recentActions[2] = m_recentActions[1];
+    m_recentActions[1] = m_recentActions[0];
+    m_recentActions[0] = (m_pendingDecision.action != 0) ? 1.0f : 0.0f;
 
     GameBridge::applyAction(playLayer, m_pendingDecision.action, m_currentlyHolding);
 }
@@ -162,29 +237,51 @@ void AIManager::onPlayerDeath(PlayLayer* playLayer) {
     m_episodeActive = false;
 
     const float pct = GameBridge::currentPercent(playLayer);
-    const auto mode = m_stats.currentGamemode();
+    const auto mode = m_hasPendingDecision ? m_pendingMode : m_stats.currentGamemode();
+    const auto resolution = m_rewards.resolveDeath();
 
     if (m_aiEnabled && m_hasPendingDecision) {
-        const float deathReward = m_rewards.computeDeathReward();
         m_stats.onStep(
             pct,
-            deathReward,
+            resolution.terminalReward,
             m_pendingDecision.action,
             m_pendingDecision.holdProb,
             m_pendingDecision.value,
             mode
         );
+
         if (m_trainingMode) {
-            auto maybeMetrics = m_agent.recordTransition(m_pendingDecision, deathReward, true, nullptr);
-            if (maybeMetrics) {
-                m_stats.onPPOUpdate(*maybeMetrics);
+            // Stage terminal death transition with 0.0f reward (no reward on death)
+            m_multiAgent.stageTransition(
+                m_pendingMode,
+                m_pendingDecision,
+                resolution.terminalReward,
+                true,
+                false,
+                0.0f,
+                m_episodeId
+            );
+
+            // Finalize episode across all gamemodes that participated:
+            // - 0x (no reward) if it died without a new best
+            // - 2x reward + elite SIL trajectory if it achieved a new best!
+            const auto updates = m_multiAgent.finalizeEpisode(
+                m_episodeId,
+                resolution.rewardMultiplier,
+                pct,
+                resolution.saveToElite,
+                resolution.fatalTrimSteps
+            );
+            for (const auto& u : updates) {
+                m_stats.onPPOUpdate(u);
             }
         }
     }
 
     m_hasPendingDecision = false;
-    m_stats.onEpisodeEnd(pct, false, mode);
-    maybeAutoSave(false);
+    m_hasTrackedHazard = false;
+    m_stats.onEpisodeEnd(pct, false, mode, resolution.finalEpisodeReward);
+    maybeAutoSave(resolution.achievedNewBest);
 }
 
 void AIManager::onLevelComplete(PlayLayer* playLayer) {
@@ -194,40 +291,71 @@ void AIManager::onLevelComplete(PlayLayer* playLayer) {
     m_holdDurationSec = 0.0f;
     m_episodeActive = false;
 
-    const auto mode = m_stats.currentGamemode();
+    const auto mode = m_hasPendingDecision ? m_pendingMode : m_stats.currentGamemode();
+    const auto resolution = m_rewards.resolveCompletion();
+
     if (m_aiEnabled && m_hasPendingDecision) {
-        const float winReward = m_rewards.computeCompletionReward();
         m_stats.onStep(
             100.0f,
-            winReward,
+            resolution.terminalReward,
             m_pendingDecision.action,
             m_pendingDecision.holdProb,
             m_pendingDecision.value,
             mode
         );
+
         if (m_trainingMode) {
-            auto maybeMetrics = m_agent.recordTransition(m_pendingDecision, winReward, true, nullptr);
-            if (maybeMetrics) {
-                m_stats.onPPOUpdate(*maybeMetrics);
-            } else if (auto forced = m_agent.forceUpdate(0.0f)) {
+            m_multiAgent.stageTransition(
+                m_pendingMode,
+                m_pendingDecision,
+                resolution.terminalReward,
+                true,
+                false,
+                0.0f,
+                m_episodeId
+            );
+
+            const auto updates = m_multiAgent.finalizeEpisode(
+                m_episodeId,
+                resolution.rewardMultiplier,
+                100.0f,
+                resolution.saveToElite,
+                0
+            );
+            if (!updates.empty()) {
+                for (const auto& u : updates) {
+                    m_stats.onPPOUpdate(u);
+                }
+            } else if (auto forced = m_multiAgent.forceUpdateActive(0.0f)) {
                 m_stats.onPPOUpdate(*forced);
             }
         }
     }
 
     m_hasPendingDecision = false;
-    m_stats.onEpisodeEnd(100.0f, true, mode);
+    m_hasTrackedHazard = false;
+    m_stats.onEpisodeEnd(100.0f, true, mode, resolution.finalEpisodeReward);
     maybeAutoSave(true);
-    log::info("[GD-AI] LEVEL COMPLETED! Total clears: {}", m_stats.totalCompletions());
+    log::info(
+        "[GD-AI] LEVEL COMPLETED! Reward: {:.1f} ({}x) | Total clears: {}",
+        resolution.finalEpisodeReward,
+        resolution.rewardMultiplier,
+        m_stats.totalCompletions()
+    );
 }
 
 void AIManager::onResetLevel(PlayLayer* playLayer) {
     if (!m_inLevel) return;
     GameBridge::releaseAllInputs(playLayer, m_currentlyHolding);
     m_holdDurationSec = 0.0f;
+    m_prevYVelocity = 0.0f;
+    m_recentActions = {0.0f, 0.0f, 0.0f, 0.0f};
     m_tickCounter = 0;
+    m_hasTrackedHazard = false;
+    m_trackedHazardX = 0.0f;
     m_hasPendingDecision = false;
     m_episodeActive = true;
+    ++m_episodeId;
 
     const float startX = (playLayer && playLayer->m_player1) ? playLayer->m_player1->getPositionX() : 0.0f;
     m_rewards.resetEpisode(startX);
@@ -247,14 +375,15 @@ void AIManager::onPauseChanged(PlayLayer* playLayer, bool paused) {
 void AIManager::onLeaveLevel(PlayLayer* playLayer) {
     GameBridge::releaseAllInputs(playLayer, m_currentlyHolding);
     GameBridge::setGameTimeScale(1.0f);
-    if (m_trainingMode && m_agent.updateCount() > m_lastSavedUpdate) {
+    if (m_trainingMode && m_multiAgent.totalUpdatesAll() > m_lastSavedUpdate) {
         saveCurrentModel();
     }
-    m_agent.clearBuffer();
+    m_multiAgent.clearAllBuffers();
     m_inLevel = false;
     m_isPaused = false;
     m_episodeActive = false;
     m_hasPendingDecision = false;
+    m_hasTrackedHazard = false;
     m_hasObservation = false;
 }
 
@@ -287,7 +416,7 @@ void AIManager::setShowVision(bool show) {
 
 void AIManager::setPerLevelModel(bool perLevel) {
     if (m_perLevelModel == perLevel) return;
-    if (m_trainingMode && m_agent.updateCount() > 0) {
+    if (m_trainingMode && m_multiAgent.totalUpdatesAll() > 0) {
         saveCurrentModel();
     }
     m_perLevelModel = perLevel;
@@ -308,45 +437,68 @@ void AIManager::setDecisionInterval(int interval) {
 
 void AIManager::applyPreset(rl::TrainingPreset preset) {
     m_activePreset = preset;
-    m_agent.applyPreset(preset);
+    m_multiAgent.applyPresetAll(preset);
 }
 
 bool AIManager::saveCurrentModel() {
-    const auto path = currentModelPath();
-    const bool ok = m_agent.saveModel(path);
-    if (ok) {
+    const auto dir = modelsDirectory();
+    const auto prefix = activeModelPrefix();
+    std::size_t saved = m_multiAgent.saveAllModels(dir, prefix, true);
+    const bool masterSaved = m_multiAgent.saveMasterBundle(masterBundlePath());
+    if (saved > 0 || masterSaved) {
         m_lastSavedBestPercent = m_stats.bestPercent();
-        m_lastSavedUpdate = m_agent.updateCount();
-        log::info("[GD-AI] Saved model checkpoint to {}", path.string());
-    } else {
-        log::error("[GD-AI] Failed to save model to {}", path.string());
+        m_lastSavedUpdate = m_multiAgent.totalUpdatesAll();
+        log::info(
+            "[GD-AI] Saved {} gamemode checkpoints & master bundle under {}/{}",
+            saved,
+            dir.string(),
+            prefix
+        );
+        return true;
     }
-    return ok;
+    log::error("[GD-AI] Failed to save gamemode models to {}", dir.string());
+    return false;
 }
 
 bool AIManager::loadCurrentModel() {
-    const auto path = currentModelPath();
-    if (!std::filesystem::exists(path)) {
-        return false;
+    const auto dir = modelsDirectory();
+    const auto prefix = activeModelPrefix();
+    const auto masterPath = masterBundlePath();
+
+    if (std::filesystem::exists(masterPath) && m_multiAgent.loadMasterBundle(masterPath)) {
+        m_lastSavedUpdate = m_multiAgent.totalUpdatesAll();
+        log::info(
+            "[GD-AI] Loaded master multi-mode bundle from {} (total updates: {}, steps: {})",
+            masterPath.string(),
+            m_multiAgent.totalUpdatesAll(),
+            m_multiAgent.totalStepsAll()
+        );
+        return true;
     }
-    const bool ok = m_agent.loadModel(path);
-    if (ok) {
-        m_lastSavedUpdate = m_agent.updateCount();
-        log::info("[GD-AI] Loaded model checkpoint from {} (updates: {}, steps: {})",
-            path.string(), m_agent.updateCount(), m_agent.totalSteps());
-    } else {
-        log::warn("[GD-AI] Existing checkpoint at {} failed validation; keeping current weights", path.string());
+
+    const std::size_t loaded = m_multiAgent.loadAllModels(dir, prefix);
+    if (loaded > 0) {
+        m_lastSavedUpdate = m_multiAgent.totalUpdatesAll();
+        log::info(
+            "[GD-AI] Loaded {} gamemode model(s) from {}/{}_*.gdai (total updates: {}, steps: {})",
+            loaded,
+            dir.string(),
+            prefix,
+            m_multiAgent.totalUpdatesAll(),
+            m_multiAgent.totalStepsAll()
+        );
+        return true;
     }
-    return ok;
+    return false;
 }
 
 void AIManager::resetModelAndStats() {
-    m_agent.reset();
+    m_multiAgent.resetAll();
     m_stats.resetAll();
     m_rewards.onLevelStart();
     m_lastSavedBestPercent = 0.0f;
     m_lastSavedUpdate = 0;
-    log::info("[GD-AI] Reset neural network weights and training statistics.");
+    log::info("[GD-AI] Reset all 8 gamemode neural networks and training statistics.");
 }
 
 bool AIManager::exportStatsCSV() {
@@ -369,7 +521,7 @@ void AIManager::refreshTimeScale() {
 void AIManager::maybeAutoSave(bool force) {
     if (!m_autoSave) return;
     const bool beatRecord = m_stats.bestPercent() > m_lastSavedBestPercent + 2.0f;
-    const bool periodic = (m_agent.updateCount() >= m_lastSavedUpdate + 10);
+    const bool periodic = (m_multiAgent.totalUpdatesAll() >= m_lastSavedUpdate + 10);
     if (force || beatRecord || periodic) {
         saveCurrentModel();
     }

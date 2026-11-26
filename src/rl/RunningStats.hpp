@@ -12,23 +12,31 @@
 
 namespace gdai::rl {
 
-/// Welford online per-feature observation normalizer.
+/// Welford online per-feature observation normalizer with safe variance floor
+/// and optional prefix-only normalization (so sparse binary vision grid cells never explode).
 class RunningMeanStd {
 public:
-    explicit RunningMeanStd(std::size_t dim = 0) { reset(dim); }
+    explicit RunningMeanStd(std::size_t dim = 0, std::size_t normPrefixDim = 0) {
+        reset(dim, normPrefixDim);
+    }
 
-    void reset(std::size_t dim) {
+    void reset(std::size_t dim, std::size_t normPrefixDim = 0) {
         m_dim = dim;
+        m_normPrefixDim = (normPrefixDim == 0 || normPrefixDim > dim) ? dim : normPrefixDim;
         m_count = 0;
         m_mean.assign(dim, 0.0);
         m_m2.assign(dim, 1.0);
+    }
+
+    void setNormPrefixDim(std::size_t normPrefixDim) {
+        m_normPrefixDim = (normPrefixDim == 0 || normPrefixDim > m_dim) ? m_dim : normPrefixDim;
     }
 
     void update(const Vec& x) {
         if (x.size() != m_dim) return;
         ++m_count;
         const double invN = 1.0 / static_cast<double>(m_count);
-        for (std::size_t i = 0; i < m_dim; ++i) {
+        for (std::size_t i = 0; i < m_normPrefixDim; ++i) {
             const double val = static_cast<double>(x[i]);
             const double delta = val - m_mean[i];
             m_mean[i] += delta * invN;
@@ -37,7 +45,7 @@ public:
         }
     }
 
-    Vec normalize(const Vec& x, float clip = 10.0f) const {
+    Vec normalize(const Vec& x, float clip = 8.0f) const {
         Vec out(m_dim, 0.0f);
         if (x.size() != m_dim) return out;
         if (m_count < 2) {
@@ -47,15 +55,21 @@ public:
             return out;
         }
         const double denom = static_cast<double>(m_count - 1);
-        for (std::size_t i = 0; i < m_dim; ++i) {
-            const double var = std::max(m_m2[i] / denom, 1e-4);
+        for (std::size_t i = 0; i < m_normPrefixDim; ++i) {
+            // Minimum variance floor (0.04 => std >= 0.2) prevents sparse flags from spiking to +/-8
+            const double var = std::max(m_m2[i] / denom, 0.04);
             const double norm = (static_cast<double>(x[i]) - m_mean[i]) / std::sqrt(var);
             out[i] = std::clamp(static_cast<float>(norm), -clip, clip);
+        }
+        // Leave binary / bounded grid suffix directly in [0, 1]
+        for (std::size_t i = m_normPrefixDim; i < m_dim; ++i) {
+            out[i] = std::clamp(x[i], -clip, clip);
         }
         return out;
     }
 
     std::size_t dim() const { return m_dim; }
+    std::size_t normPrefixDim() const { return m_normPrefixDim; }
     std::uint64_t count() const { return m_count; }
 
     void save(std::ostream& os, std::uint64_t& checksum) const {
@@ -92,6 +106,7 @@ public:
 
 private:
     std::size_t m_dim = 0;
+    std::size_t m_normPrefixDim = 0;
     std::uint64_t m_count = 0;
     std::vector<double> m_mean;
     std::vector<double> m_m2;

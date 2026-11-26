@@ -54,21 +54,59 @@ env::ObjectCategory GameBridge::classifyObject(GameObject* obj) {
 
         case GameObjectType::Solid:
         case GameObjectType::Slope:
+        case GameObjectType::Breakable:
             return env::ObjectCategory::Solid;
 
-        case GameObjectType::Decoration:
-            return env::ObjectCategory::None;
+        case GameObjectType::YellowJumpRing:
+        case GameObjectType::PinkJumpRing:
+        case GameObjectType::RedJumpRing:
+        case GameObjectType::GravityRing:
+        case GameObjectType::GreenRing:
+        case GameObjectType::DropRing:
+        case GameObjectType::CustomRing:
+        case GameObjectType::DashRing:
+        case GameObjectType::GravityDashRing:
+        case GameObjectType::SpiderOrb:
+        case GameObjectType::TeleportOrb:
+            return env::ObjectCategory::Orb;
 
-        default: {
-            // Exclude non-interactive trigger/coin/special object types by GD enum value
-            // (22=SecretCoin, 23=UserCoin, 33=Modifier/Trigger, 38=Collectible, 39=Special)
-            const int rawType = static_cast<int>(obj->m_objectType);
-            if (rawType == 22 || rawType == 23 || rawType == 33 || rawType == 38 || rawType == 39) {
-                return env::ObjectCategory::None;
-            }
-            // Portals, jump pads, jump orbs/rings, gravity/size/speed changers
-            return env::ObjectCategory::Interactive;
-        }
+        case GameObjectType::YellowJumpPad:
+        case GameObjectType::PinkJumpPad:
+        case GameObjectType::RedJumpPad:
+        case GameObjectType::GravityPad:
+        case GameObjectType::SpiderPad:
+            return env::ObjectCategory::Pad;
+
+        case GameObjectType::InverseGravityPortal:
+        case GameObjectType::NormalGravityPortal:
+        case GameObjectType::GravityTogglePortal:
+        case GameObjectType::ShipPortal:
+        case GameObjectType::CubePortal:
+        case GameObjectType::BallPortal:
+        case GameObjectType::UfoPortal:
+        case GameObjectType::WavePortal:
+        case GameObjectType::RobotPortal:
+        case GameObjectType::SpiderPortal:
+        case GameObjectType::SwingPortal:
+        case GameObjectType::RegularSizePortal:
+        case GameObjectType::MiniSizePortal:
+        case GameObjectType::DualPortal:
+        case GameObjectType::SoloPortal:
+        case GameObjectType::TeleportPortal:
+        case GameObjectType::InverseMirrorPortal:
+        case GameObjectType::NormalMirrorPortal:
+            return env::ObjectCategory::Portal;
+
+        case GameObjectType::Decoration:
+        case GameObjectType::Modifier:
+        case GameObjectType::SecretCoin:
+        case GameObjectType::UserCoin:
+        case GameObjectType::Collectible:
+        case GameObjectType::CollisionObject:
+        case GameObjectType::Special:
+        case GameObjectType::EnterEffectObject:
+        default:
+            return env::ObjectCategory::None;
     }
 }
 
@@ -80,13 +118,19 @@ std::vector<env::LevelObject> GameBridge::extractNearbyObjects(
     std::vector<env::LevelObject> result;
     if (!playLayer) return result;
 
-    const float minX = playerX - 45.0f;
-    const float maxX = playerX + 380.0f;
-    const float minY = playerY - 240.0f;
-    const float maxY = playerY + 240.0f;
+    const float minX = playerX - 60.0f;
+    const float maxX = playerX + 440.0f;
+    const float minY = playerY - 260.0f;
+    const float maxY = playerY + 260.0f;
 
     auto collectObject = [&](GameObject* obj) {
         if (!obj) return;
+        // Filter out GD's internal player collision & anticheat proxy objects
+        if (obj == playLayer->m_player1CollisionBlock ||
+            obj == playLayer->m_player2CollisionBlock ||
+            obj == playLayer->m_anticheatSpike) {
+            return;
+        }
         const auto cat = classifyObject(obj);
         if (cat == env::ObjectCategory::None) return;
 
@@ -107,7 +151,7 @@ std::vector<env::LevelObject> GameBridge::extractNearbyObjects(
         const int totalXSec = static_cast<int>(playLayer->m_sections.size());
         const int xSecStart = std::clamp(static_cast<int>(std::floor(minX / 100.0f)), 0, totalXSec - 1);
         const int xSecEnd = std::clamp(static_cast<int>(std::floor(maxX / 100.0f)), 0, totalXSec - 1);
-        result.reserve(96);
+        result.reserve(128);
 
         for (int xSec = xSecStart; xSec <= xSecEnd; ++xSec) {
             auto* col = playLayer->m_sections[static_cast<std::size_t>(xSec)];
@@ -137,7 +181,7 @@ std::vector<env::LevelObject> GameBridge::extractNearbyObjects(
             }
         }
     } else if (playLayer->m_objects) {
-        result.reserve(96);
+        result.reserve(128);
         for (auto* obj : CCArrayExt<GameObject*>(playLayer->m_objects)) {
             collectObject(obj);
         }
